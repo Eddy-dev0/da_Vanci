@@ -1,0 +1,22 @@
+{
+  "broad_brush": {
+    "max_pressure": 0.8,
+    "color_rgb": [200, 180, 160],
+    "needs_cleaning": true
+  },
+  "medium_brush": {
+    "max_pressure": 0.5,
+    "color_rgb": [160, 120, 90],
+    "needs_cleaning": true
+  },
+  "fine_brush": {
+    "max_pressure": 0.3,
+    "color_rgb": [20, 20, 20],
+    "needs_cleaning": true
+  },
+  "sponge": {
+    "max_pressure": 0.2,
+    "color_rgb": [230, 230, 230],
+    "needs_cleaning": false
+  }
+}

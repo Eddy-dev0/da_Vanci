@@ -1,0 +1,7 @@
+{
+  "work_area_mm": { "x": 300, "y": 300, "z": 80 },
+  "home_position": { "x": 0, "y": 0, "z": 50 },
+  "palette_station": { "x": 280, "y": 20, "z": 10 },
+  "wash_station": { "x": 280, "y": 40, "z": 15 },
+  "paint_z_mm": 5
+}
