@@ -349,16 +349,16 @@ class MainWindow(QMainWindow):
         """
 
         if not self.current_image_path:
-            QMessageBox.warning(self, "Kein Bild", "Bitte zuerst 'Slice planen'.")
+            QMessageBox.warning(self, "Kein Bild", "Bitte zuerst ein Bild laden.")
             return
 
         # 1. Mal-Plan (background/mid/detail) nur zur Info
         masks = self.analyzer.make_layer_masks(self.current_image_path)
-        plan = self.slicer.generate_paint_plan(masks)
+        paint_plan = self.slicer.generate_paint_plan(masks) or {"steps": []}
 
         plan_lines = ["Geplanter Ablauf (Logik):\n"]
         step_id = 1
-        for step in plan["steps"]:
+        for step in paint_plan.get("steps", []):
             plan_lines.append(
                 f"Schritt {step_id}: {step['layer']}\n"
                 f"  Werkzeug: {step['tool']}\n"
@@ -440,8 +440,6 @@ class MainWindow(QMainWindow):
         # 9. Animation State zurücksetzen
         # Animation Startzustand
         # Animations-Zustand initialisieren
-        self.paint_strokes_timeline = timeline_from_slicer  # neue Timeline
-
         # Animation-Reset
         self.anim_stroke_index = 0
         self.anim_point_index = 0
