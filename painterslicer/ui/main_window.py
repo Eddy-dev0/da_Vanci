@@ -16,8 +16,8 @@ from PySide6.QtCore import Qt, QTimer
 import os
 
 import numpy as np
-from image_analysis.analyzer import ImageAnalyzer
-from slicer.slicer_core import PainterSlicer
+from painterslicer.image_analysis.analyzer import ImageAnalyzer
+from painterslicer.slicer.slicer_core import PainterSlicer
 
 
 class MainWindow(QMainWindow):
@@ -353,8 +353,27 @@ class MainWindow(QMainWindow):
             return
 
         # 1. Mal-Plan (background/mid/detail) nur zur Info
-        masks = self.analyzer.make_layer_masks(self.current_image_path)
-        paint_plan = self.slicer.generate_paint_plan(masks) or {"steps": []}
+        try:
+            masks = self.analyzer.make_layer_masks(self.current_image_path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Analyse fehlgeschlagen",
+                f"Layer-Masken konnten nicht erzeugt werden:\n{exc}",
+            )
+            return
+
+        paint_plan: dict = {"steps": []}
+        try:
+            plan_result = self.slicer.generate_paint_plan(masks)
+            if isinstance(plan_result, dict):
+                paint_plan = plan_result
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "Planung unvollständig",
+                f"Der Slice-Plan konnte nicht vollständig erstellt werden:\n{exc}",
+            )
 
         plan_lines = ["Geplanter Ablauf (Logik):\n"]
         step_id = 1
@@ -471,6 +490,14 @@ class MainWindow(QMainWindow):
         """
         if not self.current_image_path:
             QMessageBox.warning(self, "Kein Bild", "Bitte zuerst ein Bild laden.")
+            return
+
+        if not hasattr(self.analyzer, "analyze_for_preview"):
+            QMessageBox.critical(
+                self,
+                "Analyse nicht verfügbar",
+                "Der Bild-Analyzer unterstützt keine Vorschau-Analyse.",
+            )
             return
 
         # 1) Analyse laufen lassen

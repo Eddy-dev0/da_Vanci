@@ -1,9 +1,9 @@
 from typing import Dict, Any, List, Tuple
 import cv2
-from config.config_loader import load_machine_config, load_brush_presets
+from painterslicer.config.config_loader import load_machine_config, load_brush_presets
 import numpy as np
 from skimage.color import lab2rgb
-from utils.color_model import PaintColorModel
+from painterslicer.utils.color_model import PaintColorModel
 
 
 class PainterSlicer:
