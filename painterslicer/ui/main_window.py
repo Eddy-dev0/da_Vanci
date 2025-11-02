@@ -1,3 +1,12 @@
+import os
+import sys
+from pathlib import Path
+
+if __package__ in (None, ""):
+    project_root = Path(__file__).resolve().parents[2]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -12,8 +21,6 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QIcon, QAction, QPixmap, QImage, QPainter, QPen, QColor
 from PySide6.QtCore import Qt, QTimer
-
-import os
 
 import numpy as np
 from painterslicer.image_analysis.analyzer import ImageAnalyzer
