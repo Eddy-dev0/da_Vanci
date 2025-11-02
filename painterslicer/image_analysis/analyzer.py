@@ -1,6 +1,6 @@
 import numpy as np
 import cv2
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List, Union
 from sklearn.cluster import KMeans
 from skimage.color import rgb2lab, lab2rgb
 
@@ -9,7 +9,7 @@ class ImageAnalyzer:
     """Bildanalyse / Vorverarbeitung."""
 
     def __init__(self):
-        pass
+        self.last_color_analysis: Optional[Dict[str, Any]] = None
 
     def load_image(self, image_path: str) -> np.ndarray:
         img = cv2.imread(image_path)
@@ -150,29 +150,57 @@ class ImageAnalyzer:
             paths.append(path)
         return paths
 
+    def _ensure_rgb01(
+        self,
+        image_source: Union[str, np.ndarray]
+    ) -> np.ndarray:
+        """Hilfsfunktion: lädt/konvertiert ein Bild in RGB float32 [0,1]."""
+
+        if isinstance(image_source, str):
+            img_bgr = cv2.imread(image_source, cv2.IMREAD_COLOR)
+            if img_bgr is None:
+                raise FileNotFoundError(f"Konnte Bild nicht laden: {image_source}")
+            img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+            return (img_rgb.astype(np.float32) / 255.0).clip(0, 1)
+
+        img_arr = np.asarray(image_source)
+        if img_arr.ndim != 3 or img_arr.shape[2] != 3:
+            raise ValueError("expect image as (H,W,3) array")
+
+        img_arr = img_arr.astype(np.float32)
+        if img_arr.max() > 1.0:
+            img_arr /= 255.0
+        return img_arr.clip(0, 1)
+
     def extract_color_layers(
         self,
-        img_srgb01: np.ndarray,
+        image_source: Union[str, np.ndarray],
         *,
+        k_colors: Optional[int] = None,
         k_min: int = 8,
         k_max: int = 16,
         use_dither: bool = True,
-    ) -> Dict[str, Any]:
+        min_path_length: int = 2,
+    ) -> List[Dict[str, Any]]:
         """
-        Analysiert ein RGB-Bild (float32, Werte 0..1) und erzeugt
+        Analysiert ein Bild (Dateipfad oder RGB-Array) und erzeugt
         farbbasierte Layer via adaptiver K-Means-Quantisierung in CIELAB.
 
-        Returns:
-            {
-              "preprocessed_rgb01": (H,W,3) float32 in [0,1],
-              "labels":             (H,W) int  [0..K-1],
-              "centers_lab":        (K,3) float64  (LAB-Palette),
-              "palette_rgb01":      (K,3) float64  (zugehörige RGB-Palette 0..1),
-              "quant_rgb01":        (H,W,3) float64 (quantisiertes Bild für Preview)
-            }
+        Rückgabe:
+            Liste von Layer-Dicts mit
+              "color_rgb": (r,g,b) in 0..255
+              "pixel_paths": Liste von Pfaden ([(x_px, y_px), ...])
+              "label": Cluster-Index
+
+        Zusätzlich wird das letzte Analyse-Ergebnis in
+        ``self.last_color_analysis`` abgelegt (z.B. für Preview-Zwecke).
         """
-        if img_srgb01 is None or img_srgb01.ndim != 3 or img_srgb01.shape[2] != 3:
-            raise ValueError("expect img_srgb01 as (H,W,3) float32 in [0,1]")
+
+        img_srgb01 = self._ensure_rgb01(image_source)
+
+        if k_colors is not None:
+            k_min = max(1, int(k_colors))
+            k_max = k_min
 
         img8 = (img_srgb01.clip(0, 1) * 255).astype(np.uint8)
         lab_cv = cv2.cvtColor(img8, cv2.COLOR_RGB2LAB)
@@ -219,13 +247,44 @@ class ImageAnalyzer:
         palette_rgb01 = lab2rgb(centers_lab.reshape(1, -1, 3)).reshape(-1, 3).clip(0, 1)
         quant_rgb01 = lab2rgb(lab_used).clip(0, 1)
 
-        return {
+        # Analyse-Ergebnis für Debug/Preview merken
+        self.last_color_analysis = {
             "preprocessed_rgb01": pre_rgb01,
             "labels": labels.astype(np.int32),
             "centers_lab": centers_lab,
             "palette_rgb01": palette_rgb01,
             "quant_rgb01": quant_rgb01.astype(np.float32),
         }
+
+        layers: List[Dict[str, Any]] = []
+        unique_labels = np.unique(labels)
+
+        kernel = np.ones((3, 3), np.uint8)
+
+        for li in unique_labels:
+            mask = (labels == li).astype(np.uint8) * 255
+
+            # Kleine Artefakte entfernen
+            cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
+            if cleaned.max() == 0:
+                cleaned = mask
+
+            paths = self.extract_paths_from_mask(cleaned)
+            filtered_paths = [
+                path for path in paths if len(path) >= min_path_length
+            ]
+
+            color_rgb = tuple(
+                int(np.clip(round(c * 255), 0, 255)) for c in palette_rgb01[int(li)]
+            )
+
+            layers.append({
+                "color_rgb": color_rgb,
+                "pixel_paths": filtered_paths,
+                "label": int(li),
+            })
+
+        return layers
 
 
 def preprocess_for_slicing(img_srgb01: np.ndarray) -> np.ndarray:
