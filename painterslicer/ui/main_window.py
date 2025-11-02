@@ -1,3 +1,12 @@
+import os
+import sys
+from pathlib import Path
+
+if __package__ in (None, ""):
+    project_root = Path(__file__).resolve().parents[2]
+    if str(project_root) not in sys.path:
+        sys.path.insert(0, str(project_root))
+
 from PySide6.QtWidgets import (
     QMainWindow,
     QWidget,
@@ -12,8 +21,6 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QIcon, QAction, QPixmap, QImage, QPainter, QPen, QColor
 from PySide6.QtCore import Qt, QTimer
-
-import os
 
 import numpy as np
 from painterslicer.image_analysis.analyzer import ImageAnalyzer
@@ -518,13 +525,22 @@ class MainWindow(QMainWindow):
         self._analysis_edge_mask = edge_mask.copy(order="C")
 
         # 2) In ein QImage konvertieren
-        qimg = QImage(
+        bytes_per_line = int(self._analysis_edge_mask.strides[0])
+
+        qimg_view = QImage(
             self._analysis_edge_mask.data,
             w,
             h,
-            w,  # bytesPerLine = width bei 8bit grayscale
+            bytes_per_line,
             QImage.Format_Grayscale8
         )
+
+        # QImage kopiert die Daten nicht automatisch. Durch copy() erhalten wir
+        # ein eigenständiges QImage, dessen Speicher von Qt verwaltet wird. Damit
+        # vermeiden wir Zugriffe auf bereits freigegebenen NumPy-Speicher, die
+        # zuvor zu Abstürzen (0xCFFFFFFF) beim Tab-Wechsel führten.
+        qimg = qimg_view.copy()
+        self._analysis_qimage = qimg  # Referenz halten, falls Qt lazy shared.
 
         pixmap = QPixmap.fromImage(qimg)
 
