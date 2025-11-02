@@ -197,12 +197,29 @@ class ImageAnalyzer:
         """
 
         img_srgb01 = self._ensure_rgb01(image_source)
+        orig_h, orig_w = img_srgb01.shape[:2]
+
+        # Hohe Auflösung bremst KMeans stark aus. Um UI-Timeouts zu vermeiden,
+        # rechnen wir auf einer verkleinerten Kopie (max_dim Pixel) und
+        # skalieren die Ergebnisse anschließend wieder auf die Originalgröße.
+        max_dim = 800
+        if max(orig_h, orig_w) > max_dim:
+            scale = max_dim / float(max(orig_h, orig_w))
+            new_w = max(1, int(round(orig_w * scale)))
+            new_h = max(1, int(round(orig_h * scale)))
+            img_srgb01_proc = cv2.resize(
+                img_srgb01,
+                (new_w, new_h),
+                interpolation=cv2.INTER_AREA,
+            )
+        else:
+            img_srgb01_proc = img_srgb01
 
         if k_colors is not None:
             k_min = max(1, int(k_colors))
             k_max = k_min
 
-        img8 = (img_srgb01.clip(0, 1) * 255).astype(np.uint8)
+        img8 = (img_srgb01_proc.clip(0, 1) * 255).astype(np.uint8)
         lab_cv = cv2.cvtColor(img8, cv2.COLOR_RGB2LAB)
         l, a, b = cv2.split(lab_cv)
         l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
@@ -247,22 +264,42 @@ class ImageAnalyzer:
         palette_rgb01 = lab2rgb(centers_lab.reshape(1, -1, 3)).reshape(-1, 3).clip(0, 1)
         quant_rgb01 = lab2rgb(lab_used).clip(0, 1)
 
+        # Falls wir verkleinert haben, Ergebnisse wieder auf Originalgröße bringen.
+        if (H, W) != (orig_h, orig_w):
+            labels_full = cv2.resize(
+                labels.astype(np.float32),
+                (orig_w, orig_h),
+                interpolation=cv2.INTER_NEAREST,
+            ).astype(np.int32)
+            quant_rgb01 = cv2.resize(
+                quant_rgb01,
+                (orig_w, orig_h),
+                interpolation=cv2.INTER_NEAREST,
+            )
+            pre_rgb01 = cv2.resize(
+                pre_rgb01,
+                (orig_w, orig_h),
+                interpolation=cv2.INTER_LINEAR,
+            )
+        else:
+            labels_full = labels
+
         # Analyse-Ergebnis für Debug/Preview merken
         self.last_color_analysis = {
             "preprocessed_rgb01": pre_rgb01,
-            "labels": labels.astype(np.int32),
+            "labels": labels_full.astype(np.int32),
             "centers_lab": centers_lab,
             "palette_rgb01": palette_rgb01,
             "quant_rgb01": quant_rgb01.astype(np.float32),
         }
 
         layers: List[Dict[str, Any]] = []
-        unique_labels = np.unique(labels)
+        unique_labels = np.unique(labels_full)
 
         kernel = np.ones((3, 3), np.uint8)
 
         for li in unique_labels:
-            mask = (labels == li).astype(np.uint8) * 255
+            mask = (labels_full == li).astype(np.uint8) * 255
 
             # Kleine Artefakte entfernen
             cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
