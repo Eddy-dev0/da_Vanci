@@ -1,8 +1,9 @@
 import numpy as np
 import cv2
-from typing import Dict, Any, Optional, List, Union
+from typing import Dict, Any, Optional, List, Union, Tuple
 from sklearn.cluster import KMeans
 from skimage.color import rgb2lab, lab2rgb
+from skimage.segmentation import slic
 
 
 class ImageAnalyzer:
@@ -150,6 +151,69 @@ class ImageAnalyzer:
             paths.append(path)
         return paths
 
+    def mask_to_offset_contours(
+        self,
+        mask: np.ndarray,
+        *,
+        spacing_px: int = 3,
+        min_len: int = 5,
+        max_loops: int = 512,
+    ) -> List[List[Tuple[int, int]]]:
+        """
+        Erodiert eine Maske schrittweise und sammelt pro Iteration die äußeren Konturen.
+
+        Ergebnis ist eine Liste von Pfaden, die die Fläche in nahezu gleichmäßigen
+        Abständen überdecken – damit entstehen im Slicer echte Füllstrukturen statt
+        nur Randlinien.
+        """
+
+        if mask is None or mask.size == 0:
+            return []
+
+        spacing_px = int(max(1, spacing_px))
+        if spacing_px % 2 == 0:
+            spacing_px += 1
+
+        kernel = cv2.getStructuringElement(
+            cv2.MORPH_ELLIPSE,
+            (spacing_px, spacing_px),
+        )
+        if kernel is None:
+            kernel = np.ones((3, 3), np.uint8)
+
+        current = mask.copy()
+        if current.dtype != np.uint8:
+            current = current.astype(np.uint8)
+
+        paths: List[List[Tuple[int, int]]] = []
+        loop_idx = 0
+
+        while loop_idx < max_loops and np.any(current):
+            contours, _ = cv2.findContours(
+                current,
+                mode=cv2.RETR_EXTERNAL,
+                method=cv2.CHAIN_APPROX_SIMPLE,
+            )
+
+            for cnt in contours:
+                cnt = cnt.squeeze(axis=1)
+                if len(cnt.shape) != 2 or cnt.shape[0] < min_len:
+                    continue
+
+                path = [(int(x), int(y)) for (x, y) in cnt]
+                if loop_idx % 2 == 1:
+                    path.reverse()
+                paths.append(path)
+
+            eroded = cv2.erode(current, kernel, iterations=1)
+            if np.array_equal(eroded, current):
+                break
+
+            current = eroded
+            loop_idx += 1
+
+        return paths
+
     def _ensure_rgb01(
         self,
         image_source: Union[str, np.ndarray]
@@ -230,36 +294,52 @@ class ImageAnalyzer:
 
         lab = rgb2lab(pre_rgb01)
         H, W, _ = lab.shape
-        X = lab.reshape(-1, 3)
+
+        target_segments = int(np.clip((H * W) / 1800, 200, 1600))
+        segments = slic(
+            pre_rgb01,
+            n_segments=target_segments,
+            compactness=12,
+            sigma=1,
+            start_label=0,
+        ).astype(np.int32)
+
+        num_segments = int(segments.max()) + 1
+        seg_flat = segments.reshape(-1)
+        lab_flat = lab.reshape(-1, 3)
+        counts = np.bincount(seg_flat, minlength=num_segments).astype(np.float32)
+        mean_lab = np.zeros((num_segments, 3), dtype=np.float32)
+
+        valid_mask = counts > 0
+        valid_indices = np.where(valid_mask)[0]
+
+        if valid_indices.size == 0:
+            return []
+
+        for channel in range(3):
+            sums = np.bincount(
+                seg_flat,
+                weights=lab_flat[:, channel],
+                minlength=num_segments,
+            )
+            mean_lab[:, channel] = sums / np.maximum(counts, 1e-6)
+
+        mean_lab_valid = mean_lab[valid_indices]
 
         k_auto = int(np.clip(int(np.sqrt(H * W) / 300), k_min, k_max))
-        km = KMeans(n_clusters=k_auto, n_init="auto", random_state=0).fit(X)
+        k_auto = max(1, min(k_auto, mean_lab_valid.shape[0]))
+
+        km = KMeans(n_clusters=k_auto, n_init="auto", random_state=0).fit(mean_lab_valid)
         centers_lab = km.cluster_centers_
-        labels = km.labels_.reshape(H, W)
 
-        if use_dither:
-            lab_q = lab.copy()
-            for y in range(H - 1):
-                for x in range(1, W - 1):
-                    old = lab_q[y, x]
-                    idx = int(np.argmin(np.linalg.norm(centers_lab - old, axis=1)))
-                    new = centers_lab[idx]
-                    err = old - new
-                    lab_q[y, x] = new
-                    lab_q[y, x + 1]     += err * (7 / 16)
-                    lab_q[y + 1, x - 1] += err * (3 / 16)
-                    lab_q[y + 1, x]     += err * (5 / 16)
-                    lab_q[y + 1, x + 1] += err * (1 / 16)
+        superpixel_labels = np.zeros(num_segments, dtype=np.int32)
+        superpixel_labels[valid_indices] = km.labels_
+        labels = superpixel_labels[segments]
 
-            Xq = lab_q.reshape(-1, 3)
-            dists = np.linalg.norm(
-                Xq[:, None, :] - centers_lab[None, :, :],
-                axis=2,
-            )
-            labels = np.argmin(dists, axis=1).reshape(H, W)
-            lab_used = lab_q
-        else:
-            lab_used = centers_lab[labels]
+        if use_dither and centers_lab.shape[0] < 256:
+            labels = cv2.medianBlur(labels.astype(np.uint8), 3).astype(np.int32)
+
+        lab_used = centers_lab[labels]
 
         palette_rgb01 = lab2rgb(centers_lab.reshape(1, -1, 3)).reshape(-1, 3).clip(0, 1)
         quant_rgb01 = lab2rgb(lab_used).clip(0, 1)
@@ -297,16 +377,42 @@ class ImageAnalyzer:
         unique_labels = np.unique(labels_full)
 
         kernel = np.ones((3, 3), np.uint8)
+        min_area = max(int(0.0005 * orig_h * orig_w), 64)
+
+        def _remove_small_regions(mask_arr: np.ndarray, min_pixels: int) -> np.ndarray:
+            num_labels, labels_im, stats, _ = cv2.connectedComponentsWithStats(
+                mask_arr,
+                connectivity=8,
+            )
+            cleaned_mask = np.zeros_like(mask_arr)
+            for comp_id in range(1, num_labels):
+                area = stats[comp_id, cv2.CC_STAT_AREA]
+                if area >= min_pixels:
+                    cleaned_mask[labels_im == comp_id] = 255
+            return cleaned_mask
 
         for li in unique_labels:
             mask = (labels_full == li).astype(np.uint8) * 255
 
-            # Kleine Artefakte entfernen
             cleaned = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
             if cleaned.max() == 0:
                 cleaned = mask
 
-            paths = self.extract_paths_from_mask(cleaned)
+            cleaned = cv2.morphologyEx(cleaned, cv2.MORPH_CLOSE, kernel)
+            cleaned = _remove_small_regions(cleaned, min_area)
+            if cleaned.max() == 0:
+                cleaned = mask
+
+            spacing_px = int(round(min(orig_h, orig_w) / 180))
+            spacing_px = int(np.clip(spacing_px, 3, 11))
+
+            paths = self.mask_to_offset_contours(
+                cleaned,
+                spacing_px=spacing_px,
+                min_len=min_path_length,
+            )
+            if not paths:
+                paths = self.extract_paths_from_mask(cleaned)
             filtered_paths = [
                 path for path in paths if len(path) >= min_path_length
             ]
@@ -319,7 +425,12 @@ class ImageAnalyzer:
                 "color_rgb": color_rgb,
                 "pixel_paths": filtered_paths,
                 "label": int(li),
+                "_lab_l": float(centers_lab[int(li)][0]),
             })
+
+        layers = sorted(layers, key=lambda entry: entry["_lab_l"])
+        for layer in layers:
+            layer.pop("_lab_l", None)
 
         return layers
 
