@@ -4,10 +4,9 @@ from typing import Dict, Any, Optional
 from sklearn.cluster import KMeans
 from skimage.color import rgb2lab, lab2rgb
 
+
 class ImageAnalyzer:
-    """
-    Bildanalyse / Vorverarbeitung.
-    """
+    """Bildanalyse / Vorverarbeitung."""
 
     def __init__(self):
         pass
@@ -33,7 +32,7 @@ class ImageAnalyzer:
     # ----------------------------
     #  NEU: Layer-Extraktion
     # ----------------------------
-    def make_layer_masks(self, image_path: str) -> dict:
+    def make_layer_masks(self, image_path: str) -> Dict[str, Optional[np.ndarray]]:
         """
         Gibt drei 'Malschichten'-Masken zurück:
         - background_mask: wenig Detail (grobe Flächen)
@@ -84,6 +83,7 @@ class ImageAnalyzer:
             "mid_mask": mid_mask,
             "detail_mask": detail_mask,
         }
+
     def extract_stroke_paths_from_detail(self, image_path: str):
         """
         Nimmt das Eingabebild, berechnet die detail_mask
@@ -101,34 +101,28 @@ class ImageAnalyzer:
             ]
         """
 
-        # 1. Layer-Masken holen (wir brauchen detail_mask)
         masks = self.make_layer_masks(image_path)
         detail_mask = masks.get("detail_mask")
 
         if detail_mask is None:
             return []
 
-        # Falls die Maske komplett leer ist
         if detail_mask.max() == 0:
             return []
 
-        # 2. Konturen finden
-        # OpenCV findet Konturen in weißen Bereichen (255) auf schwarzem Hintergrund (0)
         contours, _ = cv2.findContours(
             detail_mask,
-            mode=cv2.RETR_EXTERNAL,      # nur äußere Konturen, nicht verschachtelte
-            method=cv2.CHAIN_APPROX_SIMPLE  # Punkte etwas vereinfacht
+            mode=cv2.RETR_EXTERNAL,
+            method=cv2.CHAIN_APPROX_SIMPLE,
         )
 
         paths = []
 
         for cnt in contours:
-            # cnt ist ein Array der Form [[[x,y]], [[x,y]], ...]
-            cnt = cnt.squeeze(axis=1)  # macht daraus [[x,y], [x,y], ...]
+            cnt = cnt.squeeze(axis=1)
             if len(cnt.shape) != 2 or cnt.shape[0] < 2:
-                continue  # zu kurze/kaputte Kontur überspringen
+                continue
 
-            # mach eine Python-Liste von Tupeln draus
             path = []
             for (x, y) in cnt:
                 path.append((int(x), int(y)))
@@ -137,16 +131,12 @@ class ImageAnalyzer:
 
         return paths
 
-
-    def extract_paths_from_mask(self, mask):
-        """
-        Nimmt eine Binärmaske (0/255 uint8) und gibt Stroke-Pfade zurück.
-        Pfadformat wie vorher: Liste von Strokes, jeder Stroke = Liste von (x, y)
-        """
+    def extract_paths_from_mask(self, mask: np.ndarray):
+        """Nimmt eine Binärmaske (0/255 uint8) und gibt Stroke-Pfade zurück."""
         contours, _ = cv2.findContours(
             mask,
             mode=cv2.RETR_EXTERNAL,
-            method=cv2.CHAIN_APPROX_SIMPLE
+            method=cv2.CHAIN_APPROX_SIMPLE,
         )
 
         paths = []
@@ -160,173 +150,127 @@ class ImageAnalyzer:
             paths.append(path)
         return paths
 
-    # image_analysis/analyzer.py
-    from skimage.color import rgb2lab, lab2rgb
-    from sklearn.cluster import KMeans
-    import numpy as np
+    def extract_color_layers(
+        self,
+        img_srgb01: np.ndarray,
+        *,
+        k_min: int = 8,
+        k_max: int = 16,
+        use_dither: bool = True,
+    ) -> Dict[str, Any]:
+        """
+        Analysiert ein RGB-Bild (float32, Werte 0..1) und erzeugt
+        farbbasierte Layer via adaptiver K-Means-Quantisierung in CIELAB.
 
-    def quantize_adaptive_lab(img_srgb, k_min=8, k_max=16):
-        lab = rgb2lab(img_srgb)
+        Returns:
+            {
+              "preprocessed_rgb01": (H,W,3) float32 in [0,1],
+              "labels":             (H,W) int  [0..K-1],
+              "centers_lab":        (K,3) float64  (LAB-Palette),
+              "palette_rgb01":      (K,3) float64  (zugehörige RGB-Palette 0..1),
+              "quant_rgb01":        (H,W,3) float64 (quantisiertes Bild für Preview)
+            }
+        """
+        if img_srgb01 is None or img_srgb01.ndim != 3 or img_srgb01.shape[2] != 3:
+            raise ValueError("expect img_srgb01 as (H,W,3) float32 in [0,1]")
+
+        img8 = (img_srgb01.clip(0, 1) * 255).astype(np.uint8)
+        lab_cv = cv2.cvtColor(img8, cv2.COLOR_RGB2LAB)
+        l, a, b = cv2.split(lab_cv)
+        l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
+        lab_cv = cv2.merge([l, a, b])
+        rgb_cv = cv2.cvtColor(lab_cv, cv2.COLOR_LAB2RGB)
+        smooth = cv2.bilateralFilter(rgb_cv, d=9, sigmaColor=75, sigmaSpace=75)
+        pre_rgb01 = (smooth.astype(np.float32) / 255.0).clip(0, 1)
+
+        lab = rgb2lab(pre_rgb01)
         H, W, _ = lab.shape
         X = lab.reshape(-1, 3)
 
-        k = min(k_max, max(k_min, int(np.sqrt(H * W) / 300)))  # adaptiv
-        km = KMeans(n_clusters=k, n_init='auto', random_state=0).fit(X)
-        centers = km.cluster_centers_
+        k_auto = int(np.clip(int(np.sqrt(H * W) / 300), k_min, k_max))
+        km = KMeans(n_clusters=k_auto, n_init="auto", random_state=0).fit(X)
+        centers_lab = km.cluster_centers_
         labels = km.labels_.reshape(H, W)
 
-        # Floyd–Steinberg auf LAB für feinere Töne
-        lab_q = lab.copy()
-        for y in range(H - 1):
-            for x in range(1, W - 1):
-                old = lab_q[y, x]
-                idx = np.argmin(np.linalg.norm(centers - old, axis=1))
-                new = centers[idx]
-                err = old - new
-                lab_q[y, x] = new
-                # Fehler verteilen
-                lab_q[y, x + 1] += err * 7 / 16
-                lab_q[y + 1, x - 1] += err * 3 / 16
-                lab_q[y + 1, x] += err * 5 / 16
-                lab_q[y + 1, x + 1] += err * 1 / 16
+        if use_dither:
+            lab_q = lab.copy()
+            for y in range(H - 1):
+                for x in range(1, W - 1):
+                    old = lab_q[y, x]
+                    idx = int(np.argmin(np.linalg.norm(centers_lab - old, axis=1)))
+                    new = centers_lab[idx]
+                    err = old - new
+                    lab_q[y, x] = new
+                    lab_q[y, x + 1]     += err * (7 / 16)
+                    lab_q[y + 1, x - 1] += err * (3 / 16)
+                    lab_q[y + 1, x]     += err * (5 / 16)
+                    lab_q[y + 1, x + 1] += err * (1 / 16)
 
-        return lab_q, centers, labels
+            Xq = lab_q.reshape(-1, 3)
+            dists = np.linalg.norm(
+                Xq[:, None, :] - centers_lab[None, :, :],
+                axis=2,
+            )
+            labels = np.argmin(dists, axis=1).reshape(H, W)
+            lab_used = lab_q
+        else:
+            lab_used = centers_lab[labels]
 
+        palette_rgb01 = lab2rgb(centers_lab.reshape(1, -1, 3)).reshape(-1, 3).clip(0, 1)
+        quant_rgb01 = lab2rgb(lab_used).clip(0, 1)
 
+        return {
+            "preprocessed_rgb01": pre_rgb01,
+            "labels": labels.astype(np.int32),
+            "centers_lab": centers_lab,
+            "palette_rgb01": palette_rgb01,
+            "quant_rgb01": quant_rgb01.astype(np.float32),
+        }
 
 
 def preprocess_for_slicing(img_srgb01: np.ndarray) -> np.ndarray:
     """Bilateral + CLAHE für bessere Tonwerte ohne Kantenverlust."""
     img8 = (img_srgb01 * 255).astype(np.uint8)
     lab = cv2.cvtColor(img8, cv2.COLOR_RGB2LAB)
-    l,a,b = cv2.split(lab)
-    l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8)).apply(l)
-    lab = cv2.merge([l,a,b])
+    l, a, b = cv2.split(lab)
+    l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
+    lab = cv2.merge([l, a, b])
     rgb = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB)
     smooth = cv2.bilateralFilter(rgb, d=9, sigmaColor=75, sigmaSpace=75)
-    return (smooth.astype(np.float32) / 255.0).clip(0,1)
+    return (smooth.astype(np.float32) / 255.0).clip(0, 1)
 
-def quantize_adaptive_lab(img_srgb01: np.ndarray, k_min=8, k_max=16):
-    """
-    Adaptive Farbquantisierung in LAB + leichter FS-Error-Diffusion.
-    Gibt (lab_quant, centers_lab, labels) zurück.
-    """
+
+def quantize_adaptive_lab(img_srgb01: np.ndarray, k_min: int = 8, k_max: int = 16):
+    """Adaptive Farbquantisierung in LAB + leichter FS-Error-Diffusion."""
     lab = rgb2lab(img_srgb01)
-    H,W,_ = lab.shape
-    X = lab.reshape(-1,3)
-
-    k = int(np.clip(int(np.sqrt(H*W)/300), k_min, k_max))
-    km = KMeans(n_clusters=k, n_init='auto', random_state=0).fit(X)
-    centers = km.cluster_centers_
-    labels = km.labels_.reshape(H,W)
-
-    # Floyd–Steinberg (klein & simpel)
-    lab_q = lab.copy()
-    for y in range(H-1):
-        for x in range(1, W-1):
-            old = lab_q[y,x]
-            idx = np.argmin(np.linalg.norm(centers-old, axis=1))
-            new = centers[idx]
-            err = old - new
-            lab_q[y,x] = new
-            lab_q[y,  x+1] += err * 7/16
-            lab_q[y+1,x-1] += err * 3/16
-            lab_q[y+1,x]   += err * 5/16
-            lab_q[y+1,x+1] += err * 1/16
-
-    return lab_q, centers, labels
-
-def extract_edges(img_gray01: np.ndarray):
-    """Kanten für Detail-Striche (fine_brush)."""
-    g8 = (img_gray01*255).astype(np.uint8)
-    edges = cv2.Canny(g8, 50, 150)
-    cnts,_ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
-    polylines = [c[:,0,:] for c in cnts if len(c)>10]  # (N,2)-Arrays
-    return polylines
-
-
-
-
-
-
-def extract_color_layers(
-    self,
-    img_srgb01: np.ndarray,
-    *,
-    k_min: int = 8,
-    k_max: int = 16,
-    use_dither: bool = True,
-) -> Dict[str, Any]:
-    """
-    Analysiert ein RGB-Bild (float32, Werte 0..1) und erzeugt
-    farbbasierte Layer via adaptiver K-Means-Quantisierung in CIELAB.
-
-    Returns:
-        {
-          "preprocessed_rgb01": (H,W,3) float32 in [0,1],
-          "labels":             (H,W) int  [0..K-1],
-          "centers_lab":        (K,3) float64  (LAB-Palette),
-          "palette_rgb01":      (K,3) float64  (zugehörige RGB-Palette 0..1),
-          "quant_rgb01":        (H,W,3) float64 (quantisiertes Bild für Preview)
-        }
-    """
-    if img_srgb01 is None or img_srgb01.ndim != 3 or img_srgb01.shape[2] != 3:
-        raise ValueError("expect img_srgb01 as (H,W,3) float32 in [0,1]")
-
-    # -------- 1) Preprocessing: CLAHE (L) + Bilateral (glättet Flächen, schont Kanten)
-    img8 = (img_srgb01.clip(0, 1) * 255).astype(np.uint8)
-    lab_cv = cv2.cvtColor(img8, cv2.COLOR_RGB2LAB)
-    l, a, b = cv2.split(lab_cv)
-    l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
-    lab_cv = cv2.merge([l, a, b])
-    rgb_cv = cv2.cvtColor(lab_cv, cv2.COLOR_LAB2RGB)
-    smooth = cv2.bilateralFilter(rgb_cv, d=9, sigmaColor=75, sigmaSpace=75)
-    pre_rgb01 = (smooth.astype(np.float32) / 255.0).clip(0, 1)
-
-    # -------- 2) In LAB quantisieren (adaptive K-Wahl)
-    lab = rgb2lab(pre_rgb01)  # float64 (H,W,3)
     H, W, _ = lab.shape
     X = lab.reshape(-1, 3)
 
-    # einfache adaptive Heuristik: mehr Pixel -> etwas größeres K
-    k_auto = int(np.clip(int(np.sqrt(H * W) / 300), k_min, k_max))
-    km = KMeans(n_clusters=k_auto, n_init="auto", random_state=0).fit(X)
-    centers_lab = km.cluster_centers_         # (K,3)
-    labels = km.labels_.reshape(H, W)         # (H,W) ints [0..K-1]
+    k = int(np.clip(int(np.sqrt(H * W) / 300), k_min, k_max))
+    km = KMeans(n_clusters=k, n_init="auto", random_state=0).fit(X)
+    centers = km.cluster_centers_
+    labels = km.labels_.reshape(H, W)
 
-    # -------- 3) Optional: Floyd–Steinberg-Fehlerdiffusion in LAB (sanft)
-    if use_dither:
-        lab_q = lab.copy()
-        for y in range(H - 1):
-            for x in range(1, W - 1):
-                old = lab_q[y, x]
-                idx = int(np.argmin(np.linalg.norm(centers_lab - old, axis=1)))
-                new = centers_lab[idx]
-                err = old - new
-                lab_q[y, x] = new
-                # FS-Verteilung
-                lab_q[y, x + 1]     += err * (7 / 16)
-                lab_q[y + 1, x - 1] += err * (3 / 16)
-                lab_q[y + 1, x]     += err * (5 / 16)
-                lab_q[y + 1, x + 1] += err * (1 / 16)
+    lab_q = lab.copy()
+    for y in range(H - 1):
+        for x in range(1, W - 1):
+            old = lab_q[y, x]
+            idx = np.argmin(np.linalg.norm(centers - old, axis=1))
+            new = centers[idx]
+            err = old - new
+            lab_q[y, x] = new
+            lab_q[y, x + 1] += err * 7 / 16
+            lab_q[y + 1, x - 1] += err * 3 / 16
+            lab_q[y + 1, x] += err * 5 / 16
+            lab_q[y + 1, x + 1] += err * 1 / 16
 
-        # Labels nach dem Dither aktualisieren (am nächsten Zentrum)
-        Xq = lab_q.reshape(-1, 3)
-        # statt erneutem KMeans: direkte Zuordnung zum nächsten Zentrum
-        dists = np.linalg.norm(Xq[:, None, :] - centers_lab[None, :, :], axis=2)  # (N,K)
-        labels = np.argmin(dists, axis=1).reshape(H, W)
-        lab_used = lab_q
-    else:
-        lab_used = centers_lab[labels]
+    return lab_q, centers, labels
 
-    # -------- 4) Preview & Palette (RGB)
-    palette_rgb01 = lab2rgb(centers_lab.reshape(1, -1, 3)).reshape(-1, 3).clip(0, 1)
-    quant_rgb01 = lab2rgb(lab_used).clip(0, 1)  # quantisiertes Preview-Bild
 
-    return {
-        "preprocessed_rgb01": pre_rgb01,
-        "labels": labels.astype(np.int32),
-        "centers_lab": centers_lab,
-        "palette_rgb01": palette_rgb01,
-        "quant_rgb01": quant_rgb01.astype(np.float32),
-    }
+def extract_edges(img_gray01: np.ndarray):
+    """Kanten für Detail-Striche (fine_brush)."""
+    g8 = (img_gray01 * 255).astype(np.uint8)
+    edges = cv2.Canny(g8, 50, 150)
+    cnts, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+    polylines = [c[:, 0, :] for c in cnts if len(c) > 10]
+    return polylines
