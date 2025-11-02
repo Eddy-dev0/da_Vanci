@@ -510,9 +510,16 @@ class MainWindow(QMainWindow):
         # edge_mask ist ein 2D numpy array (uint8), Werte 0..255.
         h, w = edge_mask.shape
 
+        # QImage übernimmt bei dieser Konstruktion keinen Besitz an den Rohdaten.
+        # Wenn edge_mask am Ende dieser Funktion aus dem Scope fällt, zeigt QImage
+        # auf Speicher, der bereits freigegeben wurde -> Crash (0xCFFFFFFF).
+        # Wir halten deshalb eine Kopie als Instanzattribut fest, so dass die
+        # Daten während der UI-Lebensdauer gültig bleiben.
+        self._analysis_edge_mask = edge_mask.copy(order="C")
+
         # 2) In ein QImage konvertieren
         qimg = QImage(
-            edge_mask.data,
+            self._analysis_edge_mask.data,
             w,
             h,
             w,  # bytesPerLine = width bei 8bit grayscale
