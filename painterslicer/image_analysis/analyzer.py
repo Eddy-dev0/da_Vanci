@@ -401,7 +401,20 @@ class ImageAnalyzer:
                 "mid": 0.5 * mid_ratio + 0.5 * mid_strength,
                 "detail": 0.5 * detail_ratio + 0.5 * detail_strength,
             }
-            stage = max(ratios, key=ratios.get)
+            stage_scores = {
+                "background": ratios["background"]
+                + 0.2 * max(0.0, 0.4 - highlight_strength)
+                + 0.15 * max(0.0, 0.5 - color_variance_strength),
+                "mid": ratios["mid"]
+                + 0.15 * color_variance_strength
+                + 0.1 * texture_strength
+                + 0.1 * shadow_strength,
+                "detail": ratios["detail"]
+                + 0.25 * highlight_strength
+                + 0.2 * contrast_strength
+                + 0.15 * color_variance_strength,
+            }
+            stage = max(stage_scores, key=stage_scores.get)
 
             path_count = len(layer["pixel_paths"])
             path_length = int(
@@ -413,7 +426,13 @@ class ImageAnalyzer:
             tool = "round_brush"
             technique = "layered_strokes"
 
-            if coverage > 0.35 and detail_ratio < 0.25:
+            if highlight_strength > 0.65 and detail_ratio > 0.3:
+                tool = "fine_brush"
+                technique = "luminous_glazing"
+            elif shadow_strength > 0.6 and coverage < 0.2:
+                tool = "flat_brush"
+                technique = "shadow_glaze"
+            elif coverage > 0.35 and detail_ratio < 0.25 and shadow_strength < 0.5:
                 tool = "wide_brush"
                 technique = "broad_fill"
             elif stage == "mid" and 0.08 < coverage < 0.25 and detail_ratio < 0.2:
@@ -422,6 +441,13 @@ class ImageAnalyzer:
             elif detail_ratio > 0.55 or density > 0.6 or coverage < 0.05 or detail_strength > 0.55:
                 tool = "fine_brush"
                 technique = "precision_strokes"
+            elif (
+                stage == "mid"
+                and detail_ratio < 0.45
+                and color_variance_strength > 0.5
+            ):
+                tool = "round_brush"
+                technique = "vibrant_impasto"
             elif stage == "mid" and detail_ratio < 0.45:
                 tool = "flat_brush"
                 technique = "feathering"
