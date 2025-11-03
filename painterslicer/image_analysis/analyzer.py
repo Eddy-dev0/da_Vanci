@@ -74,8 +74,8 @@ class ImageAnalyzer:
             return None
 
         arr = arr.astype(np.float32)
-        min_val = float(arr.min())
-        max_val = float(arr.max())
+        min_val = float(arr.min(initial=0.0))
+        max_val = float(arr.max(initial=0.0))
         if max_val - min_val < 1e-6:
             return np.zeros_like(arr, dtype=np.float32)
         return (arr - min_val) / (max_val - min_val)
@@ -153,7 +153,7 @@ class ImageAnalyzer:
         gabor_norm = self._normalize_map(gabor_response)
         edges_norm = self._normalize_map(edges_combined.astype(np.float32))
 
-        edge_detail_score = np.clip(
+        detail_score = np.clip(
             0.55 * grad_norm + 0.35 * edges_norm + 0.20 * lap_norm,
             0.0,
             1.0,
@@ -172,74 +172,21 @@ class ImageAnalyzer:
 
         hsv = cv2.cvtColor(pre, cv2.COLOR_BGR2HSV)
         saturation_norm = self._normalize_map(hsv[:, :, 1])
-        value_norm = self._normalize_map(hsv[:, :, 2])
-
-        pre_f32 = pre.astype(np.float32)
-        blur_large_f32 = blur_large.astype(np.float32)
-        color_variance = np.linalg.norm(pre_f32 - blur_large_f32, axis=2)
-        color_variance_norm = self._normalize_map(color_variance)
-
-        tonal_mean = cv2.GaussianBlur(gray_f, (0, 0), sigmaX=3.0, sigmaY=3.0)
-        tonal_contrast = np.abs(gray_f - tonal_mean)
-        tonal_contrast_norm = self._normalize_map(tonal_contrast)
-
-        highlight_local = np.clip(
-            value_norm
-            - cv2.GaussianBlur(value_norm, (0, 0), sigmaX=2.5, sigmaY=2.5),
-            0.0,
-            1.0,
-        )
-
-        highlight_score = np.clip(
-            0.45 * value_norm
-            + 0.25 * highlight_local
-            + 0.2 * color_variance_norm
-            + 0.1 * tonal_contrast_norm,
-            0.0,
-            1.0,
-        )
-
-        shadow_base = 1.0 - value_norm
-        shadow_score = np.clip(
-            0.6 * shadow_base
-            + 0.25 * tonal_contrast_norm
-            + 0.15 * (1.0 - saturation_norm),
-            0.0,
-            1.0,
-        )
-
-        detail_enhanced = np.clip(
-            0.5 * edge_detail_score
-            + 0.2 * texture_score
-            + 0.2 * color_variance_norm
-            + 0.1 * tonal_contrast_norm,
-            0.0,
-            1.0,
-        )
 
         background_score = np.clip(
-            0.55 * dist_norm
-            + 0.2 * (1.0 - texture_score)
-            + 0.15 * (1.0 - saturation_norm)
-            + 0.1 * (1.0 - tonal_contrast_norm),
+            0.6 * dist_norm + 0.2 * (1.0 - texture_score) + 0.2 * (1.0 - saturation_norm),
             0.0,
             1.0,
         )
 
         mid_score = np.clip(
-            0.45 * texture_score
-            + 0.2 * (1.0 - dist_norm)
-            + 0.2 * saturation_norm
-            + 0.15 * color_variance_norm,
+            0.55 * texture_score + 0.25 * (1.0 - dist_norm) + 0.20 * saturation_norm,
             0.0,
             1.0,
         )
 
         detail_score = np.clip(
-            0.55 * detail_enhanced
-            + 0.2 * (1.0 - dist_norm)
-            + 0.1 * saturation_norm
-            + 0.15 * highlight_score,
+            0.65 * detail_score + 0.20 * (1.0 - dist_norm) + 0.15 * saturation_norm,
             0.0,
             1.0,
         )
@@ -256,9 +203,6 @@ class ImageAnalyzer:
         mid_mask = (assignment == 1).astype(np.uint8) * 255
         detail_mask = (assignment == 2).astype(np.uint8) * 255
 
-        highlight_mask = (highlight_score > 0.6).astype(np.uint8) * 255
-        shadow_mask = (shadow_score > 0.55).astype(np.uint8) * 255
-
         bg_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (11, 11))
         mid_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         detail_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
@@ -270,19 +214,11 @@ class ImageAnalyzer:
         mid_mask = cv2.morphologyEx(mid_mask, cv2.MORPH_OPEN, detail_kernel)
 
         detail_mask = cv2.morphologyEx(detail_mask, cv2.MORPH_DILATE, detail_kernel)
-        detail_mask = cv2.bitwise_or(detail_mask, highlight_mask)
-        detail_mask = cv2.bitwise_and(
-            detail_mask,
-            cv2.bitwise_or(edges_combined, highlight_mask),
-        )
+        detail_mask = cv2.bitwise_and(detail_mask, edges_combined)
 
         mid_mask = cv2.bitwise_and(
             mid_mask,
             cv2.bitwise_not(detail_mask),
-        )
-        mid_mask = cv2.bitwise_or(
-            mid_mask,
-            cv2.bitwise_and(shadow_mask, cv2.bitwise_not(detail_mask)),
         )
         background_mask = cv2.bitwise_and(
             background_mask,
@@ -293,8 +229,6 @@ class ImageAnalyzer:
             "background": background_mask,
             "mid": mid_mask,
             "detail": detail_mask,
-            "highlight": highlight_mask,
-            "shadow": shadow_mask,
         }
 
         return {
@@ -305,10 +239,6 @@ class ImageAnalyzer:
                 "detail": detail_score.astype(np.float32),
                 "texture": texture_score.astype(np.float32),
                 "distance": dist_norm.astype(np.float32),
-                "highlight": highlight_score.astype(np.float32),
-                "shadow": shadow_score.astype(np.float32),
-                "tonal_contrast": tonal_contrast_norm.astype(np.float32),
-                "color_variance": color_variance_norm.astype(np.float32),
             },
             "edge_maps": {
                 "detail": edges_detail,
@@ -317,8 +247,6 @@ class ImageAnalyzer:
             },
             "preprocessed": pre,
             "assignment": assignment,
-            "highlight_mask": highlight_mask,
-            "shadow_mask": shadow_mask,
         }
 
     def make_layer_masks(
@@ -394,10 +322,6 @@ class ImageAnalyzer:
         mid_score_map = score_maps.get("mid")
         background_score_map = score_maps.get("background")
         texture_score_map = score_maps.get("texture")
-        highlight_score_map = score_maps.get("highlight")
-        shadow_score_map = score_maps.get("shadow")
-        tonal_contrast_map = score_maps.get("tonal_contrast")
-        color_variance_map = score_maps.get("color_variance")
 
         color_layers = self.extract_color_layers(
             img_rgb01,
@@ -471,10 +395,6 @@ class ImageAnalyzer:
             mid_strength = _mean_score(mid_score_map, layer_mask)
             background_strength = _mean_score(background_score_map, layer_mask)
             texture_strength = _mean_score(texture_score_map, layer_mask)
-            highlight_strength = _mean_score(highlight_score_map, layer_mask)
-            shadow_strength = _mean_score(shadow_score_map, layer_mask)
-            contrast_strength = _mean_score(tonal_contrast_map, layer_mask)
-            color_variance_strength = _mean_score(color_variance_map, layer_mask)
 
             ratios = {
                 "background": 0.5 * background_ratio + 0.5 * background_strength,
@@ -518,13 +438,7 @@ class ImageAnalyzer:
             elif stage == "mid" and 0.08 < coverage < 0.25 and detail_ratio < 0.2:
                 tool = "sponge"
                 technique = "dabbing"
-            elif (
-                detail_ratio > 0.55
-                or density > 0.6
-                or coverage < 0.05
-                or detail_strength > 0.55
-                or contrast_strength > 0.55
-            ):
+            elif detail_ratio > 0.55 or density > 0.6 or coverage < 0.05 or detail_strength > 0.55:
                 tool = "fine_brush"
                 technique = "precision_strokes"
             elif (
@@ -540,12 +454,8 @@ class ImageAnalyzer:
 
             if stage == "background" and background_strength > 0.6 and coverage > 0.2:
                 technique = "gradient_blend"
-            if stage == "detail" and (
-                texture_strength > 0.5 or contrast_strength > 0.55
-            ) and coverage > 0.1:
+            if stage == "detail" and texture_strength > 0.5 and coverage > 0.1:
                 technique = "cross_hatching"
-            if stage == "detail" and highlight_strength > 0.55 and coverage <= 0.15:
-                technique = "luminous_glazing"
 
             planned_layers.append({
                 "label": label,
@@ -561,13 +471,6 @@ class ImageAnalyzer:
                 "mid_strength": float(mid_strength),
                 "background_strength": float(background_strength),
                 "texture_strength": float(texture_strength),
-                "highlight_strength": float(highlight_strength),
-                "shadow_strength": float(shadow_strength),
-                "contrast_strength": float(contrast_strength),
-                "color_variance_strength": float(color_variance_strength),
-                "stage_scores": {
-                    key: float(val) for key, val in stage_scores.items()
-                },
                 "path_count": int(path_count),
                 "path_length": int(path_length),
                 "pixel_paths": layer["pixel_paths"],
