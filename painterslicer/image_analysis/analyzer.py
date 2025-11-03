@@ -74,8 +74,8 @@ class ImageAnalyzer:
             return None
 
         arr = arr.astype(np.float32)
-        min_val = float(arr.min(initial=0.0))
-        max_val = float(arr.max(initial=0.0))
+        min_val = float(arr.min())
+        max_val = float(arr.max())
         if max_val - min_val < 1e-6:
             return np.zeros_like(arr, dtype=np.float32)
         return (arr - min_val) / (max_val - min_val)
