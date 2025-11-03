@@ -51,6 +51,7 @@ class MainWindow(QMainWindow):
         self.anim_point_index = 0
         self.paint_strokes_timeline = []
         self.preview_canvas_pixmap = None
+        self.last_planning_result = None
 
         # QTimer EINMAL erstellen und dauerhaft behalten
         self.anim_timer = QTimer(self)
@@ -359,20 +360,28 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Kein Bild", "Bitte zuerst ein Bild laden.")
             return
 
-        # 1. Mal-Plan (background/mid/detail) nur zur Info
+        # 1. Farb- und Layer-Planung (liefert Masken + Farblayer)
         try:
-            masks = self.analyzer.make_layer_masks(self.current_image_path)
+            planning_result = self.analyzer.plan_painting_layers(
+                self.current_image_path,
+                k_min=12,
+                k_max=28,
+            )
         except Exception as exc:
             QMessageBox.critical(
                 self,
                 "Analyse fehlgeschlagen",
-                f"Layer-Masken konnten nicht erzeugt werden:\n{exc}",
+                f"Planung konnte nicht erzeugt werden:\n{exc}",
             )
             return
 
+        self.last_planning_result = planning_result
+        layer_masks = planning_result.get("layer_masks", {}) or {}
+        color_layers = planning_result.get("layers", []) or []
+
         paint_plan: dict = {"steps": []}
         try:
-            plan_result = self.slicer.generate_paint_plan(masks)
+            plan_result = self.slicer.generate_paint_plan(layer_masks)
             if isinstance(plan_result, dict):
                 paint_plan = plan_result
         except Exception as exc:
@@ -381,6 +390,14 @@ class MainWindow(QMainWindow):
                 "Planung unvollständig",
                 f"Der Slice-Plan konnte nicht vollständig erstellt werden:\n{exc}",
             )
+
+        if not color_layers:
+            QMessageBox.warning(
+                self,
+                "Keine Layer",
+                "Die Analyse hat keine Farbschichten ergeben.",
+            )
+            return
 
         plan_lines = ["Geplanter Ablauf (Logik):\n"]
         step_id = 1
@@ -393,13 +410,7 @@ class MainWindow(QMainWindow):
             )
             step_id += 1
 
-        # 2. Farben clustern
-        color_layers = self.analyzer.extract_color_layers(
-            self.current_image_path,
-            k_colors=4
-        )
-
-        # 3. In mm skalieren
+        # 2. In mm skalieren
         normalized_layers = self.slicer.normalize_color_layers_to_mm(
             self.current_image_path,
             color_layers
@@ -428,14 +439,20 @@ class MainWindow(QMainWindow):
         # Eine flache Liste aller Strokes in Mal-Reihenfolge,
         # jeweils mit Farbe und Punkten.
         self.paint_strokes_timeline = []
-        for layer in normalized_layers:
+        for layer_info, layer in zip(color_layers, normalized_layers):
             rgb = layer["color_rgb"]
+            stage = layer_info.get("stage")
+            technique = layer_info.get("technique")
+            label = layer_info.get("label")
             for stroke in layer["mm_paths"]:
                 if len(stroke) < 2:
                     continue
                 self.paint_strokes_timeline.append({
                     "color_rgb": rgb,
-                    "points": stroke  # Liste [(x_mm,y_mm), ...]
+                    "points": stroke,  # Liste [(x_mm,y_mm), ...]
+                    "stage": stage,
+                    "technique": technique,
+                    "label": label,
                 })
 
         # 6. Für "alte" Preview-APIs (render_preview_frame etc.) behalten wir
@@ -451,10 +468,32 @@ class MainWindow(QMainWindow):
         lines_out.append("\n--- Farb-Layer Info ---\n")
         lines_out.append(f"Anzahl Farblayer: {len(normalized_layers)}\n")
 
-        for idx, layer in enumerate(normalized_layers):
+        for idx, (layer_info, layer) in enumerate(zip(color_layers, normalized_layers)):
             rgb = layer["color_rgb"]
+            coverage_pct = float(layer_info.get("coverage", 0.0) * 100.0)
+            stage = layer_info.get("stage", "?")
+            order = layer_info.get("order", idx)
+            tool = layer_info.get("tool", "-")
+            technique = layer_info.get("technique", "-")
+            path_count = len(layer["mm_paths"])
             lines_out.append(
-                f"Layer {idx+1}: Farbe RGB={rgb}, Pfade: {len(layer['mm_paths'])}"
+                f"Layer {idx+1:02d} (Order {order}, Stage {stage}): RGB={rgb}, "
+                f"Coverage={coverage_pct:.1f}%, Pfade={path_count}, Werkzeug={tool}, "
+                f"Technik={technique}"
+            )
+            lines_out.append(
+                "    detail={detail:.2f} mid={mid:.2f} background={bg:.2f} "
+                "texture={tex:.2f} highlight={hi:.2f} shadow={sh:.2f} "
+                "contrast={co:.2f} colorVar={cv:.2f}".format(
+                    detail=float(layer_info.get("detail_ratio", 0.0)),
+                    mid=float(layer_info.get("mid_ratio", 0.0)),
+                    bg=float(layer_info.get("background_ratio", 0.0)),
+                    tex=float(layer_info.get("texture_strength", 0.0)),
+                    hi=float(layer_info.get("highlight_strength", 0.0)),
+                    sh=float(layer_info.get("shadow_strength", 0.0)),
+                    co=float(layer_info.get("contrast_strength", 0.0)),
+                    cv=float(layer_info.get("color_variance_strength", 0.0)),
+                )
             )
 
         lines_out.append("\n--- PaintCode (Multi-Layer) ---\n")

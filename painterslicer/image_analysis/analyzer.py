@@ -311,6 +311,7 @@ class ImageAnalyzer:
         """
 
         img_rgb01 = self._ensure_rgb01(image_source)
+        img_lab01 = rgb2lab(img_rgb01)
         H, W = img_rgb01.shape[:2]
 
         layer_masks = self.make_layer_masks(image_source)
@@ -396,6 +397,60 @@ class ImageAnalyzer:
             background_strength = _mean_score(background_score_map, layer_mask)
             texture_strength = _mean_score(texture_score_map, layer_mask)
 
+            highlight_strength = 0.0
+            shadow_strength = 0.0
+            contrast_strength = 0.0
+            color_variance_strength = 0.0
+
+            if np.any(layer_mask):
+                layer_lab = img_lab01[layer_mask]
+                if layer_lab.size:
+                    l_vals = layer_lab[:, 0] / 100.0
+                    if l_vals.size > 0:
+                        if l_vals.size >= 5:
+                            high_pct = float(np.percentile(l_vals, 90))
+                            low_pct = float(np.percentile(l_vals, 10))
+                        else:
+                            high_pct = float(np.max(l_vals))
+                            low_pct = float(np.min(l_vals))
+
+                        high_frac = float(np.mean(l_vals > 0.75))
+                        low_frac = float(np.mean(l_vals < 0.35))
+
+                        highlight_strength = float(
+                            np.clip(
+                                0.6 * high_frac
+                                + 0.4 * max(0.0, high_pct - 0.65) / 0.35,
+                                0.0,
+                                1.0,
+                            )
+                        )
+                        shadow_strength = float(
+                            np.clip(
+                                0.6 * low_frac
+                                + 0.4 * max(0.0, 0.45 - low_pct) / 0.45,
+                                0.0,
+                                1.0,
+                            )
+                        )
+                        contrast_strength = float(
+                            np.clip((high_pct - low_pct) / 0.5, 0.0, 1.0)
+                        )
+
+                    ab = layer_lab[:, 1:]
+                    if ab.size:
+                        chroma = np.sqrt(np.square(ab[:, 0]) + np.square(ab[:, 1]))
+                        chroma_std = float(np.std(chroma))
+                        ab_std = float(np.mean(np.std(ab, axis=0)))
+                        color_variance_strength = float(
+                            np.clip(
+                                0.5 * (chroma_std / 25.0)
+                                + 0.5 * (ab_std / 20.0),
+                                0.0,
+                                1.0,
+                            )
+                        )
+
             ratios = {
                 "background": 0.5 * background_ratio + 0.5 * background_strength,
                 "mid": 0.5 * mid_ratio + 0.5 * mid_strength,
@@ -471,6 +526,10 @@ class ImageAnalyzer:
                 "mid_strength": float(mid_strength),
                 "background_strength": float(background_strength),
                 "texture_strength": float(texture_strength),
+                "highlight_strength": float(highlight_strength),
+                "shadow_strength": float(shadow_strength),
+                "contrast_strength": float(contrast_strength),
+                "color_variance_strength": float(color_variance_strength),
                 "path_count": int(path_count),
                 "path_length": int(path_length),
                 "pixel_paths": layer["pixel_paths"],
