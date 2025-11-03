@@ -33,7 +33,44 @@ class ImageAnalyzer:
     # ----------------------------
     #  NEU: Layer-Extraktion
     # ----------------------------
-    def make_layer_masks(self, image_path: str) -> Dict[str, Optional[np.ndarray]]:
+    def _ensure_bgr_uint8(
+        self, image_source: Union[str, np.ndarray]
+    ) -> Optional[np.ndarray]:
+        """
+        Internal helper that converts an arbitrary image input into a BGR uint8 array.
+
+        ``image_source`` can either be a file path or an RGB-like numpy array. Arrays are
+        assumed to be in RGB channel order if they are not already BGR; they will be
+        converted to BGR for OpenCV processing.
+        """
+
+        if isinstance(image_source, str):
+            return self.load_image(image_source)
+
+        img_arr = np.asarray(image_source)
+        if img_arr.ndim != 3 or img_arr.shape[2] != 3:
+            raise ValueError("expect image as (H,W,3) array")
+
+        if img_arr.dtype == np.uint8:
+            img_uint8 = img_arr.copy()
+        else:
+            arr = img_arr.astype(np.float32)
+            if arr.max() <= 1.0:
+                arr = arr * 255.0
+            img_uint8 = np.clip(arr, 0, 255).astype(np.uint8)
+
+        try:
+            img_bgr = cv2.cvtColor(img_uint8, cv2.COLOR_RGB2BGR)
+        except cv2.error:
+            # Falls das Eingabebild schon im BGR-Format war, führt eine erneute
+            # Umwandlung manchmal zu Fehlern. Dann versuchen wir es ohne Konvertierung.
+            img_bgr = img_uint8
+
+        return img_bgr
+
+    def make_layer_masks(
+        self, image_source: Union[str, np.ndarray]
+    ) -> Dict[str, Optional[np.ndarray]]:
         """
         Gibt drei 'Malschichten'-Masken zurück:
         - background_mask: wenig Detail (grobe Flächen)
@@ -43,7 +80,7 @@ class ImageAnalyzer:
         Rückgabe: dict mit drei 2D-Numpy-Arrays (uint8)
         """
 
-        img = self.load_image(image_path)
+        img = self._ensure_bgr_uint8(image_source)
         edges = self.edge_mask(img)  # 0..255, weiße Kanten auf schwarz
 
         if edges is None:
@@ -83,6 +120,179 @@ class ImageAnalyzer:
             "background_mask": background_mask,
             "mid_mask": mid_mask,
             "detail_mask": detail_mask,
+        }
+
+    def plan_painting_layers(
+        self,
+        image_source: Union[str, np.ndarray],
+        *,
+        k_colors: Optional[int] = None,
+        k_min: int = 8,
+        k_max: int = 16,
+    ) -> Dict[str, Any]:
+        """
+        Erzeugt einen heuristischen Malplan von groben zu feinen Schichten.
+
+        Rückgabeformat::
+
+            {
+                "image_size": (H, W),
+                "layer_masks": {"background_mask": ..., ...},
+                "layers": [
+                    {
+                        "label": int,
+                        "color_rgb": (r, g, b),
+                        "coverage": float,
+                        "stage": "background" | "mid" | "detail",
+                        "tool": str,
+                        "technique": str,
+                        "detail_ratio": float,
+                        "mid_ratio": float,
+                        "background_ratio": float,
+                        "path_count": int,
+                        "path_length": int,
+                        "order": int,
+                        "pixel_paths": [...]
+                    },
+                    ...
+                ],
+            }
+
+        Damit lässt sich das Bild von hinten (große Farbflächen) nach vorne (Details)
+        planen und jeweils ein geeignetes Werkzeug auswählen.
+        """
+
+        img_rgb01 = self._ensure_rgb01(image_source)
+        H, W = img_rgb01.shape[:2]
+
+        layer_masks = self.make_layer_masks(image_source)
+
+        color_layers = self.extract_color_layers(
+            img_rgb01,
+            k_colors=k_colors,
+            k_min=k_min,
+            k_max=k_max,
+        )
+
+        labels = None
+        if self.last_color_analysis is not None:
+            labels = self.last_color_analysis.get("labels")
+
+        if labels is None:
+            raise RuntimeError(
+                "labels not available after color extraction; did extract_color_layers fail?"
+            )
+
+        if labels.shape[0] != H or labels.shape[1] != W:
+            labels = cv2.resize(
+                labels.astype(np.int32),
+                (W, H),
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+        background_mask = layer_masks.get("background_mask")
+        mid_mask = layer_masks.get("mid_mask")
+        detail_mask = layer_masks.get("detail_mask")
+
+        if background_mask is not None and background_mask.shape != (H, W):
+            background_mask = cv2.resize(background_mask, (W, H), interpolation=cv2.INTER_NEAREST)
+        if mid_mask is not None and mid_mask.shape != (H, W):
+            mid_mask = cv2.resize(mid_mask, (W, H), interpolation=cv2.INTER_NEAREST)
+        if detail_mask is not None and detail_mask.shape != (H, W):
+            detail_mask = cv2.resize(detail_mask, (W, H), interpolation=cv2.INTER_NEAREST)
+
+        total_pixels = float(H * W)
+
+        def _mask_overlap_ratio(layer_mask: np.ndarray, ref_mask: Optional[np.ndarray]) -> float:
+            if ref_mask is None or ref_mask.max() == 0:
+                return 0.0
+            ref_bool = ref_mask > 0
+            overlap = np.logical_and(layer_mask, ref_bool)
+            layer_area = max(int(np.count_nonzero(layer_mask)), 1)
+            return float(np.count_nonzero(overlap)) / float(layer_area)
+
+        stage_priority = {"background": 0, "mid": 1, "detail": 2}
+
+        planned_layers: List[Dict[str, Any]] = []
+
+        for layer in color_layers:
+            label = int(layer["label"])
+            layer_mask = labels == label
+            layer_area = int(np.count_nonzero(layer_mask))
+            if layer_area == 0:
+                continue
+
+            coverage = layer_area / total_pixels
+            detail_ratio = _mask_overlap_ratio(layer_mask, detail_mask)
+            mid_ratio = _mask_overlap_ratio(layer_mask, mid_mask)
+            background_ratio = _mask_overlap_ratio(layer_mask, background_mask)
+
+            ratios = {
+                "background": background_ratio,
+                "mid": mid_ratio,
+                "detail": detail_ratio,
+            }
+            stage = max(ratios, key=ratios.get)
+
+            path_count = len(layer["pixel_paths"])
+            path_length = int(
+                sum(len(path) for path in layer["pixel_paths"])
+            )
+            density = float(path_length) / float(layer_area)
+            density = float(np.clip(density, 0.0, 1.0))
+
+            tool = "round_brush"
+            technique = "layered_strokes"
+
+            if coverage > 0.35 and detail_ratio < 0.25:
+                tool = "wide_brush"
+                technique = "broad_fill"
+            elif stage == "mid" and 0.08 < coverage < 0.25 and detail_ratio < 0.2:
+                tool = "sponge"
+                technique = "dabbing"
+            elif detail_ratio > 0.55 or density > 0.6 or coverage < 0.05:
+                tool = "fine_brush"
+                technique = "precision_strokes"
+            elif stage == "mid" and detail_ratio < 0.45:
+                tool = "flat_brush"
+                technique = "feathering"
+
+            planned_layers.append({
+                "label": label,
+                "color_rgb": layer["color_rgb"],
+                "coverage": float(coverage),
+                "stage": stage,
+                "tool": tool,
+                "technique": technique,
+                "detail_ratio": float(detail_ratio),
+                "mid_ratio": float(mid_ratio),
+                "background_ratio": float(background_ratio),
+                "path_count": int(path_count),
+                "path_length": int(path_length),
+                "pixel_paths": layer["pixel_paths"],
+                "stage_priority": stage_priority.get(stage, 1),
+            })
+
+        planned_layers.sort(
+            key=lambda entry: (
+                entry["stage_priority"],
+                -entry["background_ratio"],
+                entry["coverage"],
+            )
+        )
+
+        for order, layer in enumerate(planned_layers):
+            layer["order"] = order
+            layer.pop("stage_priority", None)
+
+        return {
+            "image_size": (H, W),
+            "layer_masks": {
+                "background_mask": background_mask,
+                "mid_mask": mid_mask,
+                "detail_mask": detail_mask,
+            },
+            "layers": planned_layers,
         }
 
     def extract_stroke_paths_from_detail(self, image_path: str):
