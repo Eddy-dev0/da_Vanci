@@ -651,22 +651,40 @@ class PaintingPipeline:
             return srgb
 
         kernel = np.ones((3, 3), np.uint8)
-        opened = cv2.morphologyEx(candidate_mask, cv2.MORPH_OPEN, kernel)
-
-        num_labels, labels = cv2.connectedComponents(opened)
+        num_labels, labels = cv2.connectedComponents(candidate_mask)
         removal_mask = np.zeros_like(candidate_mask, dtype=np.uint8)
 
         for label in range(1, num_labels):
-            if np.count_nonzero(labels == label) < min_component_size:
-                removal_mask[labels == label] = 255
+            component = labels == label
+            component_size = int(np.count_nonzero(component))
+            if component_size >= min_component_size:
+                continue
+
+            dilated = cv2.dilate(component.astype(np.uint8), kernel, iterations=1).astype(bool)
+            border = np.logical_and(dilated, ~component)
+            if np.count_nonzero(border) == 0:
+                continue
+
+            border_value = value[border]
+            if float(np.mean(border_value)) < max(value_threshold * 2.0, 0.18):
+                continue
+
+            removal_mask[dilated] = 255
 
         if np.count_nonzero(removal_mask) == 0:
-            return srgb
+            cleaned_rgb = srgb
+        else:
+            inpaint_input = (srgb * 255).astype(np.uint8)
+            inpaint_bgr = cv2.cvtColor(inpaint_input, cv2.COLOR_RGB2BGR)
+            cleaned_bgr = cv2.inpaint(inpaint_bgr, removal_mask, inpaint_radius, cv2.INPAINT_TELEA)
+            cleaned_rgb = cv2.cvtColor(cleaned_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
 
-        inpaint_input = (srgb * 255).astype(np.uint8)
-        inpaint_bgr = cv2.cvtColor(inpaint_input, cv2.COLOR_RGB2BGR)
-        cleaned_bgr = cv2.inpaint(inpaint_bgr, removal_mask, inpaint_radius, cv2.INPAINT_TELEA)
-        cleaned_rgb = cv2.cvtColor(cleaned_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        residual_mask = cleaned_rgb.max(axis=2) < value_threshold
+        if np.count_nonzero(residual_mask) == 0:
+            return np.clip(cleaned_rgb, 0.0, 1.0)
+
+        median_rgb = cv2.medianBlur((cleaned_rgb * 255).astype(np.uint8), 5).astype(np.float32) / 255.0
+        cleaned_rgb[residual_mask] = median_rgb[residual_mask]
         return np.clip(cleaned_rgb, 0.0, 1.0)
 
     def _blue_noise_mask(self, shape: Tuple[int, int]) -> np.ndarray:
