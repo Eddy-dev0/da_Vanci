@@ -275,34 +275,51 @@ class PaintingPipeline:
         rgb01 = self.analyzer._ensure_rgb01(image_source)
         rgb_linear = _linearise_srgb(rgb01)
 
-        denoised = self._denoise(
-            rgb_linear,
-            bilateral_diameter,
-            bilateral_sigma_color,
-            bilateral_sigma_space,
-            apply_guided_filter,
-            guided_radius,
-            guided_eps,
+        exact_palette_mode = bool(
+            palette_colors is None and (palette_size is None or palette_size <= 0)
         )
+
+        if exact_palette_mode:
+            denoised = np.clip(rgb_linear, 0.0, 1.0)
+        else:
+            denoised = self._denoise(
+                rgb_linear,
+                bilateral_diameter,
+                bilateral_sigma_color,
+                bilateral_sigma_space,
+                apply_guided_filter,
+                guided_radius,
+                guided_eps,
+            )
 
         sr = denoised
         superres_applied = False
-        if enable_superres:
+        if enable_superres and not exact_palette_mode:
             sr, superres_applied = self._run_super_resolution(
                 denoised,
                 scale=superres_scale,
                 model_path=superres_model_path,
             )
 
-        tone_mapped = self._apply_clahe_and_sharpen(sr, clahe_clip_limit, clahe_grid_size, sharpen_amount)
+        if exact_palette_mode:
+            tone_mapped = np.clip(sr, 0.0, 1.0)
+        else:
+            tone_mapped = self._apply_clahe_and_sharpen(sr, clahe_clip_limit, clahe_grid_size, sharpen_amount)
 
-        calibrated = self._apply_calibration(tone_mapped, calibration_profile)
+        if exact_palette_mode:
+            calibrated = np.clip(tone_mapped, 0.0, 1.0)
+        else:
+            calibrated = self._apply_calibration(tone_mapped, calibration_profile)
 
         palette = self._reduce_palette(calibrated, palette_size, palette_colors)
 
-        dithered = self._apply_dithering(calibrated, palette, method=dither)
-        dithered = self._cleanup_black_speckles(dithered)
-        dithered = self._refine_post_slicing(dithered)
+        if exact_palette_mode:
+            H_exact, W_exact = palette.indexed_image.shape
+            dithered = palette.palette_rgb[palette.indexed_image].reshape(H_exact, W_exact, 3)
+        else:
+            dithered = self._apply_dithering(calibrated, palette, method=dither)
+            dithered = self._cleanup_black_speckles(dithered)
+            dithered = self._refine_post_slicing(dithered)
 
         stroke_plan = self._plan_strokes(dithered, palette, slic_segments, slic_compactness, stroke_spacing_px)
 
@@ -312,12 +329,16 @@ class PaintingPipeline:
         # cycle described in the specification.  The second pass operates on the
         # already enhanced output which mimics analysing and repainting the
         # intermediate canvas once more for maximal fidelity.
-        post_processed_passes: List[np.ndarray] = []
-        post_pass_input = simulation
-        for _ in range(2):
-            post_pass_input = self._post_process_render(post_pass_input, reference_rgb=calibrated)
-            post_processed_passes.append(post_pass_input)
-        post_processed = post_processed_passes[-1] if post_processed_passes else simulation
+        if exact_palette_mode:
+            post_processed = np.clip(simulation, 0.0, 1.0)
+            post_processed_passes: List[np.ndarray] = [post_processed]
+        else:
+            post_processed_passes = []
+            post_pass_input = simulation
+            for _ in range(2):
+                post_pass_input = self._post_process_render(post_pass_input, reference_rgb=calibrated)
+                post_processed_passes.append(post_pass_input)
+            post_processed = post_processed_passes[-1] if post_processed_passes else simulation
 
         metrics = self._evaluate_quality(rgb01, post_processed)
 
@@ -341,6 +362,7 @@ class PaintingPipeline:
                 "calibration_profile": calibration_profile,
                 "palette_colors": palette_colors,
                 "post_process_passes": len(post_processed_passes) or 0,
+                "exact_palette_mode": exact_palette_mode,
             },
         )
 
@@ -475,6 +497,15 @@ class PaintingPipeline:
             palette = np.clip(np.asarray(palette_colors, dtype=np.float32), 0, 1)
             if palette.max() > 1.0:
                 palette /= 255.0
+        elif palette_size is None or palette_size <= 0 or palette_size >= H * W:
+            palette_rgb = rgb.reshape(-1, 3).copy()
+            indexed_image = np.arange(H * W, dtype=np.int32).reshape(H, W)
+            delta_e_map = np.zeros((H, W), dtype=np.float32)
+            return PaletteResult(
+                palette_rgb=palette_rgb,
+                indexed_image=indexed_image,
+                delta_e_map=delta_e_map,
+            )
         else:
             palette = self._palette_via_libimagequant(img_uint8, palette_size)
             if palette is None:
