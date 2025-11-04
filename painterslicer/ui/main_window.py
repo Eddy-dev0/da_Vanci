@@ -68,7 +68,8 @@ class MainWindow(QMainWindow):
         # ...
         self.anim_in_progress = False
         self.anim_stroke_index = 0
-        self.anim_point_index = 0
+        self.anim_point_index = 0  # nächstes Segment innerhalb eines Strokes
+        self.current_highlight_segment: Optional[Tuple[int, int]] = None
         self.paint_strokes_timeline = []
         self.preview_canvas_pixmap = None
         self.last_planning_result = None
@@ -78,7 +79,7 @@ class MainWindow(QMainWindow):
         self.anim_timer.setTimerType(Qt.PreciseTimer)  # präziser Takt
         self.anim_timer.setSingleShot(False)  # WICHTIG: NICHT SingleShot
         self.anim_timer.setInterval(30)  # Default, wird bei Play gesetzt
-        #self.anim_timer.timeout.connect(self.animation_step)
+        self.anim_timer.timeout.connect(self.animation_step)
         self.anim_timer.stop()
 
         # ---- User-Einstellungen für Mal-Parameter (MÜSSEN früh kommen!) ----
@@ -298,6 +299,8 @@ class MainWindow(QMainWindow):
         self.progress_slider.valueChanged.connect(self.scrub_preview_to)
 
         layout.addStretch(1)
+
+        self.speed_slider.valueChanged.connect(self._update_animation_speed)
 
         return tab
 
@@ -576,6 +579,7 @@ class MainWindow(QMainWindow):
         self.anim_stroke_index = 0
         self.anim_point_index = 0
         self.anim_in_progress = False
+        self.current_highlight_segment = None
 
         # Fortschritt-Slider setzen (0..len-1)
         if hasattr(self, "progress_slider"):
@@ -586,6 +590,7 @@ class MainWindow(QMainWindow):
         # erstes Bild: noch nix gemalt
         pm0 = self._render_full_state_at(-1)  # liefert schwarze Fläche
         if pm0 is not None:
+            self.preview_canvas_pixmap = pm0
             self.preview_label.setPixmap(pm0)
             self.preview_label.setText("")
         self._update_progress_ui()
@@ -1238,6 +1243,8 @@ class MainWindow(QMainWindow):
         from PySide6.QtGui import QPixmap, QPainter, QPen, QColor
         from PySide6.QtCore import Qt
 
+        self.stop_preview_animation()
+
         if not self.paint_strokes_timeline or len(self.paint_strokes_timeline) == 0:
             self.preview_label.setText("Keine Pfade vorhanden.\nBitte 'Slice planen'.")
             self.preview_label.setPixmap(QPixmap())
@@ -1278,6 +1285,8 @@ class MainWindow(QMainWindow):
 
         painter.end()
 
+        self.preview_canvas_pixmap = pm
+        self.current_highlight_segment = None
         self.preview_label.setPixmap(pm)
         self.preview_label.setText("")
 
@@ -1375,6 +1384,7 @@ class MainWindow(QMainWindow):
             self.anim_in_progress = False
             self.btn_play.setText("Play")
             self.anim_timer.stop()
+            self._update_progress_ui()
             return
 
         # Start/Resume
@@ -1386,19 +1396,25 @@ class MainWindow(QMainWindow):
             self.anim_stroke_index = 0
             self.anim_point_index = 0
 
-        # Geschwindigkeit aus Slider
-        interval_ms = int(self.speed_slider.value()) if hasattr(self, "speed_slider") else 30
-        if interval_ms < 5: interval_ms = 5
-        self.anim_timer.setInterval(interval_ms)
+        self.anim_timer.stop()
+
+        # Vor dem Fortsetzen aktuell markiertes Segment finalisieren
+        self._finalize_current_highlight_to_canvas()
+        self.current_highlight_segment = None
+
+        # Basisbild (alle fertigen Strokes + bereits gemalte Segmente) aufbauen
+        self._reset_preview_canvas_for_animation()
+
+        # Geschwindigkeit aus Slider übernehmen
+        self._update_animation_speed(self.speed_slider.value() if hasattr(self, "speed_slider") else 30)
         self.anim_timer.setSingleShot(False)  # Sicherheit: wiederholt feuern
 
-        # Basisbild (alles vor current stroke) bauen und ersten Frame zeigen
-        self._rebuild_base_canvas_from_progress()
-        self.render_live_state()
-        self._update_progress_ui()
+        # Ersten Frame sofort anzeigen, damit direkt ein Highlight sichtbar ist
+        self.animation_step()
 
-        # Timer los
-        self.anim_timer.start()
+        # Falls Animation noch aktiv -> Timer starten
+        if self.anim_in_progress:
+            self.anim_timer.start()
 
 
 
@@ -1407,42 +1423,43 @@ class MainWindow(QMainWindow):
         if not self.anim_in_progress or not strokes:
             return
 
-        # fertig?
-        if self.anim_stroke_index >= len(strokes):
-            final_pm = self._render_full_state_at(len(strokes) - 1)
-            if final_pm:
-                self.preview_label.setPixmap(final_pm)
-                self.preview_label.setText("")
-            self.anim_timer.stop()
-            self.anim_in_progress = False
-            self.btn_play.setText("Play")
-            self._update_progress_ui()
-            return
+        # Zuvor hervorgehobenes Segment in Finalfarbe übernehmen
+        if self.current_highlight_segment is not None:
+            self._finalize_current_highlight_to_canvas()
 
-        pts = strokes[self.anim_stroke_index]["points"]
+        if self.preview_canvas_pixmap is None:
+            self._reset_preview_canvas_for_animation()
 
-        if len(pts) < 2:
-            self.anim_stroke_index += 1
-            self.anim_point_index = 0
-        else:
-            self.anim_point_index += 1
-            if self.anim_point_index >= len(pts) - 1:
+        # Sicherstellen, dass wir auf einem gültigen Stroke stehen
+        while self.anim_stroke_index < len(strokes):
+            stroke = strokes[self.anim_stroke_index]
+            pts = stroke.get("points", [])
+            num_segments = max(len(pts) - 1, 0)
+
+            if num_segments <= 0:
                 self.anim_stroke_index += 1
                 self.anim_point_index = 0
+                continue
 
+            if self.anim_point_index >= num_segments:
+                self.anim_stroke_index += 1
+                self.anim_point_index = 0
+                continue
+
+            break
+
+        # Sind wir komplett fertig?
         if self.anim_stroke_index >= len(strokes):
-            final_pm = self._render_full_state_at(len(strokes) - 1)
-            if final_pm:
-                self.preview_label.setPixmap(final_pm)
-                self.preview_label.setText("")
-            self.anim_timer.stop()
-            self.anim_in_progress = False
-            self.btn_play.setText("Play")
-            self._update_progress_ui()
+            self._finalize_animation_display()
             return
 
-        self._rebuild_base_canvas_from_progress()
+        # Aktuelles Segment markieren und anzeigen
+        segment_idx = self.anim_point_index
+        self.current_highlight_segment = (self.anim_stroke_index, segment_idx)
         self.render_live_state()
+
+        # Für den nächsten Tick ist das nächste Segment an der Reihe
+        self.anim_point_index += 1
         self._update_progress_ui()
 
 
@@ -1452,6 +1469,12 @@ class MainWindow(QMainWindow):
         self.anim_in_progress = False
         self.btn_play.setText("Play")
         self.anim_timer.stop()
+        self._finalize_current_highlight_to_canvas()
+
+        if self.preview_canvas_pixmap is not None:
+            self.preview_label.setPixmap(QPixmap(self.preview_canvas_pixmap))
+            self.preview_label.setText("")
+
         self._update_progress_ui()
 
 
@@ -1460,17 +1483,20 @@ class MainWindow(QMainWindow):
 
     def _update_progress_ui(self):
         strokes = self.paint_strokes_timeline
-        max_idx = max(len(strokes) - 1, 0)
+        total_strokes = len(strokes)
+        slider_max = max(total_strokes - 1, 0)
 
         # Slider darf nie größer sein als letzter Stroke
         if hasattr(self, "progress_slider"):
-            self.progress_slider.setMaximum(max_idx)
-            # Während Play folgen wir automatisch der Animation
-            if self.anim_in_progress:
-                self.progress_slider.setValue(min(self.anim_stroke_index, max_idx))
+            self.progress_slider.setMaximum(slider_max)
+            if total_strokes == 0:
+                self.progress_slider.setValue(0)
+            else:
+                self.progress_slider.setValue(min(self.anim_stroke_index, slider_max))
 
         if hasattr(self, "progress_label"):
-            self.progress_label.setText(f"{min(self.anim_stroke_index, max_idx)} / {max_idx}")
+            completed = min(self.anim_stroke_index, total_strokes)
+            self.progress_label.setText(f"{completed} / {total_strokes}")
 
 
 
@@ -1512,41 +1538,45 @@ class MainWindow(QMainWindow):
             return
 
         if self.preview_canvas_pixmap is None:
-            self._rebuild_base_canvas_from_progress()
+            self._reset_preview_canvas_for_animation()
+
+        if self.preview_canvas_pixmap is None:
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText("Keine Pfade vorhanden.\nBitte 'Slice planen'.")
+            return
 
         frame_pm = QPixmap(self.preview_canvas_pixmap)
 
-        # aktuellen Stroke (teilweise) grün highlighten
-        if self.anim_stroke_index < len(strokes):
-            stroke = strokes[self.anim_stroke_index]
-            pts = stroke["points"]
+        highlight = self.current_highlight_segment
+        if highlight is not None:
+            stroke_idx, segment_idx = highlight
+            if 0 <= stroke_idx < len(strokes):
+                stroke = strokes[stroke_idx]
+                pts = stroke.get("points", [])
+                if len(pts) >= 2 and 0 <= segment_idx < len(pts) - 1:
+                    painter = QPainter(frame_pm)
+                    painter.setRenderHint(QPainter.Antialiasing, True)
 
-            if len(pts) >= 2:
-                painter = QPainter(frame_pm)
-                painter.setRenderHint(QPainter.Antialiasing, True)
+                    neon_green = QColor(0, 255, 0, 255)
+                    pen = QPen(neon_green)
+                    pen.setWidth(3)
+                    painter.setPen(pen)
 
-                neon_green = QColor(0, 255, 0, 255)
-                pen = QPen(neon_green)
-                pen.setWidth(3)
-                painter.setPen(pen)
+                    work_w = float(self.slicer.work_w_mm)
+                    work_h = float(self.slicer.work_h_mm)
+                    canvas_w = frame_pm.width()
+                    canvas_h = frame_pm.height()
 
-                # Wir zeichnen nur die ersten anim_point_index Segmente
-                max_i = min(self.anim_point_index, len(pts) - 1)
-                work_w = float(self.slicer.work_w_mm)
-                work_h = float(self.slicer.work_h_mm)
+                    (x1_mm, y1_mm) = pts[segment_idx]
+                    (x2_mm, y2_mm) = pts[segment_idx + 1]
 
-                for i in range(max_i):
-                    (x1_mm, y1_mm) = pts[i]
-                    (x2_mm, y2_mm) = pts[i + 1]
-
-                    x1_px = int((x1_mm / work_w) * 800)
-                    y1_px = int((y1_mm / work_h) * 800)
-                    x2_px = int((x2_mm / work_w) * 800)
-                    y2_px = int((y2_mm / work_h) * 800)
+                    x1_px = int((x1_mm / work_w) * canvas_w)
+                    y1_px = int((y1_mm / work_h) * canvas_h)
+                    x2_px = int((x2_mm / work_w) * canvas_w)
+                    y2_px = int((y2_mm / work_h) * canvas_h)
 
                     painter.drawLine(x1_px, y1_px, x2_px, y2_px)
-
-                painter.end()
+                    painter.end()
 
         self.preview_label.setPixmap(frame_pm)
         self.preview_label.setText("")
@@ -1632,6 +1662,8 @@ class MainWindow(QMainWindow):
 
         pm = self._render_full_state_at(clamped)
         if pm:
+            self.preview_canvas_pixmap = pm
+            self.current_highlight_segment = None
             self.preview_label.setPixmap(pm)
             self.preview_label.setText("")
 
@@ -1645,6 +1677,9 @@ class MainWindow(QMainWindow):
         """
         Baut ein neues leeres Canvas auf (schwarzer Hintergrund)
         und malt alle Strokes VOR dem aktuellen anim_stroke_index vollständig drauf.
+        Zusätzlich werden bereits abgeschlossene Segmente des aktuellen Strokes
+        (bis anim_point_index) in Finalfarbe gerendert, damit beim Fortsetzen
+        nahtlos angeschlossen wird.
         Danach benutzen wir dieses Canvas weiter inkrementell.
         """
         from PySide6.QtGui import QPixmap, QPainter, QPen, QColor
@@ -1664,47 +1699,69 @@ class MainWindow(QMainWindow):
 
         # Male alle komplett fertigen Strokes schon rein (voller Deckkraft)
         for s_idx in range(min(self.anim_stroke_index, len(strokes))):
-            pts = strokes[s_idx]["points"]
-            rgb = strokes[s_idx]["color_rgb"]
-            if len(pts) < 2:
-                continue
+            self._draw_full_stroke(painter, strokes[s_idx], canvas_w, canvas_h, work_w, work_h)
 
-            pen = QPen(QColor(rgb[0], rgb[1], rgb[2], 255))  # volle Deckkraft
-            pen.setWidth(3)
-            painter.setPen(pen)
+        # Teile des aktuellen Strokes, die bereits gemalt wurden, hinzufügen
+        if 0 <= self.anim_stroke_index < len(strokes):
+            stroke = strokes[self.anim_stroke_index]
+            pts = stroke["points"]
+            rgb = stroke["color_rgb"]
+            if len(pts) >= 2:
+                pen = QPen(QColor(rgb[0], rgb[1], rgb[2], 255))
+                pen.setWidth(3)
+                painter.setPen(pen)
 
-            for i in range(len(pts) - 1):
-                (x1_mm, y1_mm) = pts[i]
-                (x2_mm, y2_mm) = pts[i + 1]
-                x1_px = int((x1_mm / work_w) * canvas_w)
-                y1_px = int((y1_mm / work_h) * canvas_h)
-                x2_px = int((x2_mm / work_w) * canvas_w)
-                y2_px = int((y2_mm / work_h) * canvas_h)
-                painter.drawLine(x1_px, y1_px, x2_px, y2_px)
+                upto = min(max(self.anim_point_index, 0), len(pts) - 1)
+                for i in range(upto):
+                    (x1_mm, y1_mm) = pts[i]
+                    (x2_mm, y2_mm) = pts[i + 1]
+                    x1_px = int((x1_mm / work_w) * canvas_w)
+                    y1_px = int((y1_mm / work_h) * canvas_h)
+                    x2_px = int((x2_mm / work_w) * canvas_w)
+                    y2_px = int((y2_mm / work_h) * canvas_h)
+                    painter.drawLine(x1_px, y1_px, x2_px, y2_px)
 
         painter.end()
         self.preview_canvas_pixmap = pm
 
 
+    def _draw_full_stroke(self, painter, stroke: Dict[str, Any], canvas_w: int, canvas_h: int, work_w: float, work_h: float) -> None:
+        pts = stroke.get("points", [])
+        rgb = stroke.get("color_rgb", (255, 255, 255))
+        if len(pts) < 2:
+            return
 
-    def _finalize_current_stroke_into_canvas(self):
-        """
-        Den gerade fertigen Stroke in echter Farbe dauerhaft ins Canvas 'einbrennen'.
-        """
-        from PySide6.QtGui import QPainter, QPen, QColor, QPixmap
+        pen = QPen(QColor(rgb[0], rgb[1], rgb[2], 255))
+        pen.setWidth(3)
+        painter.setPen(pen)
 
+        for i in range(len(pts) - 1):
+            (x1_mm, y1_mm) = pts[i]
+            (x2_mm, y2_mm) = pts[i + 1]
+            x1_px = int((x1_mm / work_w) * canvas_w)
+            y1_px = int((y1_mm / work_h) * canvas_h)
+            x2_px = int((x2_mm / work_w) * canvas_w)
+            y2_px = int((y2_mm / work_h) * canvas_h)
+            painter.drawLine(x1_px, y1_px, x2_px, y2_px)
+
+
+    def _finalize_segment_into_canvas(self, stroke_index: int, segment_index: int) -> None:
         strokes = self.paint_strokes_timeline
+        if not strokes:
+            return
+
+        if stroke_index < 0 or stroke_index >= len(strokes):
+            return
+
+        stroke = strokes[stroke_index]
+        pts = stroke.get("points", [])
+        if len(pts) < 2 or segment_index < 0 or segment_index >= len(pts) - 1:
+            return
+
         if self.preview_canvas_pixmap is None:
             self._reset_preview_canvas_for_animation()
 
-        if self.anim_stroke_index >= len(strokes):
-            return
-
-        stroke = strokes[self.anim_stroke_index]
-        pts = stroke["points"]
-        color_rgb = stroke["color_rgb"]
-
-        if len(pts) < 2:
+        if self.preview_canvas_pixmap is None:
             return
 
         canvas_w = self.preview_canvas_pixmap.width()
@@ -1712,37 +1769,75 @@ class MainWindow(QMainWindow):
         work_w = float(self.slicer.work_w_mm)
         work_h = float(self.slicer.work_h_mm)
 
-        # aktuelle Leinwand kopieren & darauf malen
-        base_pm = QPixmap(self.preview_canvas_pixmap)
-        p = QPainter(base_pm)
-        p.setRenderHint(QPainter.Antialiasing, True)
+        color_rgb = stroke.get("color_rgb", (255, 255, 255))
+        painter = QPainter(self.preview_canvas_pixmap)
+        painter.setRenderHint(QPainter.Antialiasing, True)
 
-        # final in voller Deckkraft, Tool-Strichbreite 3 als "Pinsel"
         pen = QPen(QColor(color_rgb[0], color_rgb[1], color_rgb[2], 255))
         pen.setWidth(3)
-        p.setPen(pen)
+        painter.setPen(pen)
 
-        for i in range(len(pts) - 1):
-            (x1_mm, y1_mm) = pts[i]
-            (x2_mm, y2_mm) = pts[i + 1]
+        (x1_mm, y1_mm) = pts[segment_index]
+        (x2_mm, y2_mm) = pts[segment_index + 1]
+        x1_px = int((x1_mm / work_w) * canvas_w)
+        y1_px = int((y1_mm / work_h) * canvas_h)
+        x2_px = int((x2_mm / work_w) * canvas_w)
+        y2_px = int((y2_mm / work_h) * canvas_h)
 
-            x1_px = int((x1_mm / work_w) * canvas_w)
-            y1_px = int((y1_mm / work_h) * canvas_h)
-            x2_px = int((x2_mm / work_w) * canvas_w)
-            y2_px = int((y2_mm / work_h) * canvas_h)
+        painter.drawLine(x1_px, y1_px, x2_px, y2_px)
+        painter.end()
 
-            p.drawLine(x1_px, y1_px, x2_px, y2_px)
 
-        p.end()
+    def _finalize_current_highlight_to_canvas(self) -> None:
+        if not self.current_highlight_segment:
+            return
 
-        # neue Leinwand übernehmen
-        self.preview_canvas_pixmap = base_pm
+        stroke_idx, segment_idx = self.current_highlight_segment
+        self._finalize_segment_into_canvas(stroke_idx, segment_idx)
+        self.current_highlight_segment = None
+
+
+    def _finalize_animation_display(self) -> None:
+        self.anim_timer.stop()
+        self.anim_in_progress = False
+        self.btn_play.setText("Play")
+
+        final_pm = None
+        if self.preview_canvas_pixmap is not None:
+            final_pm = QPixmap(self.preview_canvas_pixmap)
+        elif self.paint_strokes_timeline:
+            final_pm = self._render_full_state_at(len(self.paint_strokes_timeline) - 1)
+
+        if final_pm is not None:
+            self.preview_label.setPixmap(final_pm)
+            self.preview_label.setText("")
+        else:
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText("Keine Pfade vorhanden.\nBitte 'Slice planen'.")
+
+        self.current_highlight_segment = None
+        self._update_progress_ui()
 
 
     def _update_animation_speed(self, value: int):
         if not hasattr(self, "anim_timer"):
             return
-        interval_ms = int(value)
-        if interval_ms < 5: interval_ms = 5
+        slider = getattr(self, "speed_slider", None)
+        if slider is not None:
+            min_val = float(slider.minimum())
+            max_val = float(slider.maximum())
+        else:
+            min_val = 1.0
+            max_val = 200.0
+
+        span = max(max_val - min_val, 1.0)
+        normalized = (float(value) - min_val) / span
+        normalized = max(0.0, min(normalized, 1.0))
+
+        min_interval = 5.0   # sehr schnell
+        max_interval = 2000.0  # sehr langsam
+        interval_ms = int(min_interval * ((max_interval / min_interval) ** normalized))
+        interval_ms = max(1, interval_ms)
+
         self.anim_timer.setInterval(interval_ms)
 
