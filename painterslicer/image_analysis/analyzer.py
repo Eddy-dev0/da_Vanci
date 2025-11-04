@@ -1,9 +1,19 @@
+import hashlib
+import os
+from typing import Dict, Any, Optional, List, Union, Tuple
+
 import numpy as np
 import cv2
-from typing import Dict, Any, Optional, List, Union, Tuple
 from sklearn.cluster import KMeans
 from skimage.color import rgb2lab, lab2rgb
 from skimage.segmentation import slic
+from PIL import Image, ImageEnhance, ImageFilter
+from scipy import ndimage as ndi
+
+try:  # SimpleITK ist optional, verbessert aber die Rauschunterdrückung massiv
+    import SimpleITK as sitk
+except ImportError:  # pragma: no cover - Fallback erlaubt weiterhin Basisfunktionalität
+    sitk = None
 
 
 class ImageAnalyzer:
@@ -12,6 +22,9 @@ class ImageAnalyzer:
     def __init__(self):
         self.last_color_analysis: Optional[Dict[str, Any]] = None
         self.last_layer_analysis: Optional[Dict[str, Any]] = None
+        self.last_enhanced_rgb01: Optional[np.ndarray] = None
+        self.last_enhanced_bgr: Optional[np.ndarray] = None
+        self._last_enhanced_signature: Optional[Tuple[Any, ...]] = None
 
     def load_image(self, image_path: str) -> np.ndarray:
         img = cv2.imread(image_path)
@@ -27,13 +40,143 @@ class ImageAnalyzer:
         return edges
 
     def analyze_for_preview(self, image_path: str) -> np.ndarray:
-        img = self.load_image(image_path)
+        img = self.enhance_image_quality(image_path)
+        if img is None:
+            img = self.load_image(image_path)
         mask = self.edge_mask(img)
         return mask
 
     # ----------------------------
     #  NEU: Layer-Extraktion
     # ----------------------------
+    def _make_source_signature(
+        self, image_source: Union[str, np.ndarray]
+    ) -> Tuple[Any, ...]:
+        if isinstance(image_source, str):
+            path = os.path.abspath(image_source)
+            try:
+                stat = os.stat(path)
+                mtime = int(stat.st_mtime)
+                size = int(stat.st_size)
+            except OSError:
+                mtime = None
+                size = None
+            return ("path", path, mtime, size)
+
+        arr = np.asarray(image_source)
+        shape = tuple(arr.shape)
+        dtype = str(arr.dtype)
+        if arr.size == 0:
+            return ("array", shape, dtype, 0)
+
+        flat = arr.reshape(-1)
+        sample = flat[: min(flat.size, 4096)].tobytes()
+        digest = hashlib.sha1(sample).hexdigest()
+        return ("array", shape, dtype, digest, int(arr.size))
+
+    def enhance_image_quality(
+        self,
+        image_source: Union[str, np.ndarray],
+        *,
+        color_boost: float = 1.05,
+        contrast_boost: float = 1.12,
+        sharpness_boost: float = 1.15,
+        anisotropic_iterations: int = 12,
+        anisotropic_conductance: float = 1.8,
+        gaussian_sigma: float = 0.8,
+        detail_amount: float = 0.55,
+        median_size: int = 3,
+    ) -> Optional[np.ndarray]:
+        """
+        Führt eine hochwertige Vorverarbeitung durch, die mehrere moderne Bibliotheken
+        kombiniert (Pillow, SimpleITK, SciPy). Das Ergebnis ist ein kontrastreiches
+        und entrauschtes BGR-Bild, das insbesondere für das Layering und die
+        Segmentierung optimiert ist.
+
+        Die einzelnen Schritte basieren auf bewährten Workflows aus der
+        Bildverarbeitung: sanfte Farbanpassung (Pillow), anisotrope Diffusion zur
+        Rauschunterdrückung bei gleichzeitiger Kantenerhaltung (SimpleITK) und ein
+        unsharp-masking-ähnlicher Boost der Details (SciPy ndimage).
+        """
+
+        source_signature = self._make_source_signature(image_source)
+
+        if (
+            self.last_enhanced_bgr is not None
+            and self._last_enhanced_signature == source_signature
+        ):
+            return self.last_enhanced_bgr.copy()
+
+        base_bgr = self._ensure_bgr_uint8(image_source)
+        if base_bgr is None:
+            return None
+
+        base_rgb = cv2.cvtColor(base_bgr, cv2.COLOR_BGR2RGB)
+        rgb01 = (base_rgb.astype(np.float32) / 255.0).clip(0.0, 1.0)
+
+        pil_img = Image.fromarray((rgb01 * 255).astype(np.uint8))
+        pil_img = ImageEnhance.Color(pil_img).enhance(color_boost)
+        pil_img = ImageEnhance.Contrast(pil_img).enhance(contrast_boost)
+        pil_img = ImageEnhance.Sharpness(pil_img).enhance(sharpness_boost)
+        pil_img = pil_img.filter(ImageFilter.DETAIL)
+        pil_arr = np.asarray(pil_img).astype(np.float32) / 255.0
+
+        processed = pil_arr
+        if sitk is not None:
+            sitk_img = sitk.GetImageFromArray(processed.astype(np.float32), isVector=True)
+            sitk_img = sitk.CurvatureAnisotropicDiffusion(
+                sitk_img,
+                timeStep=0.05,
+                conductanceParameter=float(np.clip(anisotropic_conductance, 0.1, 5.0)),
+                numberOfIterations=int(np.clip(anisotropic_iterations, 1, 30)),
+            )
+            processed = sitk.GetArrayFromImage(sitk_img)
+            processed = np.asarray(processed, dtype=np.float32)
+            processed = np.clip(processed, 0.0, 1.0)
+
+        gaussian_sigma = float(np.clip(gaussian_sigma, 0.2, 3.0))
+        median_size = int(max(3, median_size if median_size % 2 == 1 else median_size + 1))
+        detail_amount = float(np.clip(detail_amount, 0.0, 1.0))
+
+        blurred = np.stack(
+            [
+                ndi.gaussian_filter(processed[..., c], sigma=gaussian_sigma, mode="reflect")
+                for c in range(processed.shape[-1])
+            ],
+            axis=-1,
+        )
+
+        baseline = np.stack(
+            [
+                ndi.median_filter(blurred[..., c], size=median_size, mode="reflect")
+                for c in range(blurred.shape[-1])
+            ],
+            axis=-1,
+        )
+
+        boosted = np.clip(blurred + detail_amount * (blurred - baseline), 0.0, 1.0)
+
+        gray_edges = cv2.cvtColor(base_bgr, cv2.COLOR_BGR2GRAY)
+        edge_strength = cv2.Canny(gray_edges, 60, 160)
+        edge_weight = cv2.GaussianBlur(edge_strength.astype(np.float32) / 255.0, (5, 5), 0)
+        edge_weight = edge_weight[..., None]
+
+        mixed = np.clip(
+            boosted * (1.0 - 0.35 * edge_weight) + rgb01 * (0.35 * edge_weight),
+            0.0,
+            1.0,
+        )
+
+        final_rgb01 = mixed.astype(np.float32)
+        final_rgb_u8 = np.clip(final_rgb01 * 255.0, 0, 255).astype(np.uint8)
+        final_bgr = cv2.cvtColor(final_rgb_u8, cv2.COLOR_RGB2BGR)
+
+        self.last_enhanced_rgb01 = final_rgb01.copy()
+        self.last_enhanced_bgr = final_bgr.copy()
+        self._last_enhanced_signature = source_signature
+
+        return self.last_enhanced_bgr.copy()
+
     def _ensure_bgr_uint8(
         self, image_source: Union[str, np.ndarray]
     ) -> Optional[np.ndarray]:
@@ -257,9 +400,11 @@ class ImageAnalyzer:
         (Hintergrund, Mittelgrund, Detail) für das Malprogramm zu erzeugen.
         """
 
-        img = self._ensure_bgr_uint8(image_source)
+        enhanced_bgr = self.enhance_image_quality(image_source)
+        if enhanced_bgr is None:
+            enhanced_bgr = self._ensure_bgr_uint8(image_source)
 
-        analysis = self._analyze_layers_with_opencv(img)
+        analysis = self._analyze_layers_with_opencv(enhanced_bgr)
         self.last_layer_analysis = analysis
 
         masks = analysis.get("masks", {})
@@ -311,7 +456,12 @@ class ImageAnalyzer:
         planen und jeweils ein geeignetes Werkzeug auswählen.
         """
 
-        img_rgb01 = self._ensure_rgb01(image_source)
+        enhanced_bgr = self.enhance_image_quality(image_source)
+        if enhanced_bgr is not None and self.last_enhanced_rgb01 is not None:
+            img_rgb01 = self.last_enhanced_rgb01.copy()
+        else:
+            img_rgb01 = self._ensure_rgb01(image_source)
+            img_rgb01 = img_rgb01.copy()
         img_lab01 = rgb2lab(img_rgb01)
         H, W = img_rgb01.shape[:2]
 
@@ -341,7 +491,7 @@ class ImageAnalyzer:
         }
 
         color_layers = self.extract_color_layers(
-            img_rgb01,
+            image_source,
             **extract_kwargs,
         )
 
@@ -759,7 +909,11 @@ class ImageAnalyzer:
         wodurch einzelne Pinselstriche besser nachvollzogen werden können.
         """
 
-        img_srgb01 = self._ensure_rgb01(image_source)
+        enhanced_bgr = self.enhance_image_quality(image_source)
+        if enhanced_bgr is not None and self.last_enhanced_rgb01 is not None:
+            img_srgb01 = self.last_enhanced_rgb01.copy()
+        else:
+            img_srgb01 = self._ensure_rgb01(image_source)
         detail_scale = float(np.clip(detail_edge_boost, 0.3, 4.0))
         spacing_scale = float(np.clip(stroke_spacing_scale, 0.2, 2.5))
         edge_sense = float(np.clip(edge_sensitivity, 0.25, 4.0))
@@ -1016,3 +1170,4 @@ def extract_edges(img_gray01: np.ndarray):
     cnts, _ = cv2.findContours(edges, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
     polylines = [c[:, 0, :] for c in cnts if len(c) > 10]
     return polylines
+

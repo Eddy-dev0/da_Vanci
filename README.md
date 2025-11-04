@@ -1,6 +1,18 @@
 # da_Vinci
 "When the steel brush touches the soul of colors, the machine paints what humans dare to think."
 
+## Verbesserte Bildverarbeitung
+
+Die Bildanalyse verwendet jetzt eine mehrstufige High-End-Pipeline, die auf den in
+[Neptune.ai beschriebenen Best Practices](https://neptune.ai/blog/image-processing-python-libraries-for-machine-learning)
+aufbaut. Über Pillow, SciPy und SimpleITK werden Farbdynamik, anisotrope
+Rauschunterdrückung sowie detailerhaltende Schärfung kombiniert, bevor OpenCV die
+Segmentierung übernimmt. Das Resultat sind deutlich glattere Farbflächen und klarere
+Konturen für den Malplaner.
+
+Alle benötigten Python-Abhängigkeiten, inklusive der neuen Bibliotheken (SciPy,
+SimpleITK, Pillow), finden sich in `requirements.txt`.
+
 ## Übernahme von Änderungen aus einem externen Branch
 
 Falls du die hier bereitgestellten Commits in dein lokales Projekt übernehmen möchtest, führe die folgenden Schritte im Stammverzeichnis deines PainterSlicer-Git-Repositories aus (dort, wo sich der Ordner `.git` befindet). Wenn du dich nicht im richtigen Verzeichnis befindest, meldet Git wie in deinem Screenshot, dass es sich „nicht um ein Git-Repository“ handelt.
