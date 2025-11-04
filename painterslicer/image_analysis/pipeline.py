@@ -289,6 +289,7 @@ class PaintingPipeline:
 
         dithered = self._apply_dithering(calibrated, palette, method=dither)
         dithered = self._cleanup_black_speckles(dithered)
+        dithered = self._refine_post_slicing(dithered)
 
         stroke_plan = self._plan_strokes(dithered, palette, slic_segments, slic_compactness, stroke_spacing_px)
 
@@ -651,23 +652,92 @@ class PaintingPipeline:
             return srgb
 
         kernel = np.ones((3, 3), np.uint8)
-        opened = cv2.morphologyEx(candidate_mask, cv2.MORPH_OPEN, kernel)
-
-        num_labels, labels = cv2.connectedComponents(opened)
+        num_labels, labels = cv2.connectedComponents(candidate_mask)
         removal_mask = np.zeros_like(candidate_mask, dtype=np.uint8)
 
         for label in range(1, num_labels):
-            if np.count_nonzero(labels == label) < min_component_size:
-                removal_mask[labels == label] = 255
+            component = labels == label
+            component_size = int(np.count_nonzero(component))
+            if component_size >= min_component_size:
+                continue
+
+            dilated = cv2.dilate(component.astype(np.uint8), kernel, iterations=1).astype(bool)
+            border = np.logical_and(dilated, ~component)
+            if np.count_nonzero(border) == 0:
+                continue
+
+            border_value = value[border]
+            if float(np.mean(border_value)) < max(value_threshold * 2.0, 0.18):
+                continue
+
+            removal_mask[dilated] = 255
 
         if np.count_nonzero(removal_mask) == 0:
+            cleaned_rgb = srgb
+        else:
+            inpaint_input = (srgb * 255).astype(np.uint8)
+            inpaint_bgr = cv2.cvtColor(inpaint_input, cv2.COLOR_RGB2BGR)
+            cleaned_bgr = cv2.inpaint(inpaint_bgr, removal_mask, inpaint_radius, cv2.INPAINT_TELEA)
+            cleaned_rgb = cv2.cvtColor(cleaned_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+
+        residual_mask = cleaned_rgb.max(axis=2) < value_threshold
+        if np.count_nonzero(residual_mask) == 0:
+            return np.clip(cleaned_rgb, 0.0, 1.0)
+
+        median_rgb = cv2.medianBlur((cleaned_rgb * 255).astype(np.uint8), 5).astype(np.float32) / 255.0
+        cleaned_rgb[residual_mask] = median_rgb[residual_mask]
+        return np.clip(cleaned_rgb, 0.0, 1.0)
+
+    def _refine_post_slicing(
+        self,
+        dithered_rgb: np.ndarray,
+        *,
+        closing_iterations: int = 2,
+        highlight_percentile: float = 0.87,
+        highlight_strength: float = 0.18,
+    ) -> np.ndarray:
+        """Final pass after slicing to tidy pepper noise and softly lift highlights."""
+
+        srgb = np.clip(dithered_rgb, 0.0, 1.0).astype(np.float32)
+        if srgb.size == 0:
             return srgb
 
-        inpaint_input = (srgb * 255).astype(np.uint8)
-        inpaint_bgr = cv2.cvtColor(inpaint_input, cv2.COLOR_RGB2BGR)
-        cleaned_bgr = cv2.inpaint(inpaint_bgr, removal_mask, inpaint_radius, cv2.INPAINT_TELEA)
-        cleaned_rgb = cv2.cvtColor(cleaned_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        return np.clip(cleaned_rgb, 0.0, 1.0)
+        img8 = (srgb * 255.0).astype(np.uint8)
+        hsv = cv2.cvtColor(img8, cv2.COLOR_RGB2HSV)
+        value = hsv[..., 2]
+
+        kernel = np.ones((3, 3), np.uint8)
+        closed = cv2.morphologyEx(value, cv2.MORPH_CLOSE, kernel, iterations=max(1, int(closing_iterations)))
+        blended = cv2.addWeighted(value, 0.45, closed, 0.55, 0)
+        blended = cv2.medianBlur(blended, 3)
+        hsv[..., 2] = blended
+        refined_rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB).astype(np.float32) / 255.0
+
+        residual_dark = refined_rgb.max(axis=2) < 0.12
+        if np.count_nonzero(residual_dark):
+            residual_mask = cv2.dilate(residual_dark.astype(np.uint8) * 255, kernel, iterations=1)
+            inpaint_bgr = cv2.cvtColor((refined_rgb * 255.0).astype(np.uint8), cv2.COLOR_RGB2BGR)
+            inpainted_bgr = cv2.inpaint(inpaint_bgr, residual_mask, 3, cv2.INPAINT_TELEA)
+            refined_rgb = cv2.cvtColor(inpainted_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+
+        lab = cv2.cvtColor((np.clip(refined_rgb, 0.0, 1.0) * 255.0).astype(np.uint8), cv2.COLOR_RGB2LAB)
+        L_channel = lab[..., 0].astype(np.float32) / 255.0
+        percentile = float(np.clip(highlight_percentile, 0.0, 1.0) * 100.0)
+        threshold = np.percentile(L_channel, percentile)
+        highlight_mask = L_channel >= threshold
+
+        if np.any(highlight_mask) and np.count_nonzero(highlight_mask) < highlight_mask.size:
+            expanded = cv2.dilate((highlight_mask.astype(np.uint8) * 255), kernel, iterations=1).astype(bool)
+            strength = float(np.clip(highlight_strength, 0.0, 1.0))
+            L_channel[expanded] = np.clip(
+                L_channel[expanded] + strength * (1.0 - L_channel[expanded]),
+                0.0,
+                1.0,
+            )
+            lab[..., 0] = (L_channel * 255.0).astype(np.uint8)
+
+        highlighted_rgb = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB).astype(np.float32) / 255.0
+        return np.clip(highlighted_rgb, 0.0, 1.0)
 
     def _blue_noise_mask(self, shape: Tuple[int, int]) -> np.ndarray:
         rng = np.random.default_rng(12345)
