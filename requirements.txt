@@ -1,0 +1,8 @@
+numpy
+opencv-python
+scikit-image
+scikit-learn
+PySide6
+Pillow
+scipy
+SimpleITK
