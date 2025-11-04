@@ -614,6 +614,8 @@ class ImageAnalyzer:
             mid_ratio = _mask_overlap_ratio(layer_mask, mid_mask)
             background_ratio = _mask_overlap_ratio(layer_mask, background_mask)
 
+            shading_kind = layer.get("shading")
+
             detail_strength = _mean_score(detail_score_map, layer_mask)
             mid_strength = _mean_score(mid_score_map, layer_mask)
             background_strength = _mean_score(background_score_map, layer_mask)
@@ -704,6 +706,11 @@ class ImageAnalyzer:
             stage_scores["detail"] *= float(style_profile.get("detail_stage_gain", 1.0))
             stage = max(stage_scores, key=stage_scores.get)
 
+            if shading_kind == "highlight" and stage != "detail":
+                stage = "detail"
+            elif shading_kind == "shadow" and stage == "background":
+                stage = "mid"
+
             path_count = len(layer["pixel_paths"])
             path_length = int(
                 sum(len(path) for path in layer["pixel_paths"])
@@ -714,7 +721,13 @@ class ImageAnalyzer:
             tool = "round_brush"
             technique = "layered_strokes"
 
-            if highlight_strength > 0.65 and detail_ratio > 0.3:
+            if shading_kind == "highlight":
+                tool = "fine_brush"
+                technique = "luminous_glazing"
+            elif shading_kind == "shadow":
+                tool = "flat_brush" if coverage > 0.08 else "round_brush"
+                technique = "shadow_glaze"
+            elif highlight_strength > 0.65 and detail_ratio > 0.3:
                 tool = "fine_brush"
                 technique = "luminous_glazing"
             elif shadow_strength > 0.6 and coverage < 0.2:
@@ -752,6 +765,7 @@ class ImageAnalyzer:
                 "stage": stage,
                 "tool": tool,
                 "technique": technique,
+                "shading": shading_kind,
                 "detail_ratio": float(detail_ratio),
                 "mid_ratio": float(mid_ratio),
                 "background_ratio": float(background_ratio),
@@ -1119,6 +1133,137 @@ class ImageAnalyzer:
         else:
             labels_full = labels
 
+        shading_annotations: Dict[int, str] = {}
+
+        score_maps = {}
+        if self.last_layer_analysis is not None:
+            score_maps = self.last_layer_analysis.get("score_maps", {})
+
+        def _prepare_score_map(map_arr: Optional[np.ndarray]) -> Optional[np.ndarray]:
+            if map_arr is None:
+                return None
+            map_arr = np.asarray(map_arr, dtype=np.float32)
+            if map_arr.shape != (orig_h, orig_w):
+                map_arr = cv2.resize(
+                    map_arr,
+                    (orig_w, orig_h),
+                    interpolation=cv2.INTER_LINEAR,
+                )
+            return map_arr
+
+        detail_map_full = _prepare_score_map(score_maps.get("detail"))
+        texture_map_full = _prepare_score_map(score_maps.get("texture"))
+
+        structure_map = None
+        if detail_map_full is not None or texture_map_full is not None:
+            structure_map = np.zeros((orig_h, orig_w), dtype=np.float32)
+            if detail_map_full is not None:
+                structure_map += 0.6 * detail_map_full
+            if texture_map_full is not None:
+                structure_map += 0.4 * texture_map_full
+            structure_map = np.clip(structure_map, 0.0, 1.0)
+
+        lab_full = rgb2lab(img_srgb01).astype(np.float32)
+        lightness_map = (lab_full[..., 0] / 100.0).astype(np.float32)
+
+        labels_aug = labels_full.copy()
+        centers_list = [centers_lab[i].copy() for i in range(centers_lab.shape[0])]
+        next_label = len(centers_list)
+        total_pixels = orig_h * orig_w
+        min_structure_pixels = max(int(0.00025 * total_pixels), 24)
+
+        unique_base_labels = np.unique(labels_full)
+
+        for base_label in unique_base_labels:
+            mask = labels_aug == base_label
+            pixel_count = int(np.count_nonzero(mask))
+            if pixel_count < min_structure_pixels:
+                continue
+
+            layer_lightness = lightness_map[mask]
+            if layer_lightness.size < 8:
+                continue
+
+            detail_strength = 0.0
+            if detail_map_full is not None:
+                detail_strength = float(np.mean(detail_map_full[mask]))
+
+            texture_strength = 0.0
+            if texture_map_full is not None:
+                texture_strength = float(np.mean(texture_map_full[mask]))
+
+            structure_strength = max(detail_strength, texture_strength)
+
+            highlight_pct = float(
+                np.clip(90.0 - 20.0 * structure_strength, 68.0, 96.0)
+            )
+            shadow_pct = float(
+                np.clip(10.0 + 20.0 * structure_strength, 4.0, 32.0)
+            )
+
+            highlight_thr = float(np.percentile(layer_lightness, highlight_pct))
+            shadow_thr = float(np.percentile(layer_lightness, shadow_pct))
+
+            highlight_mask = np.logical_and(mask, lightness_map >= highlight_thr)
+            shadow_mask = np.logical_and(mask, lightness_map <= shadow_thr)
+
+            if structure_map is not None:
+                gate = float(np.clip(0.38 + 0.35 * structure_strength, 0.2, 0.85))
+                highlight_mask = np.logical_and(highlight_mask, structure_map >= gate - 0.12)
+                shadow_mask = np.logical_and(shadow_mask, structure_map >= gate - 0.18)
+
+            highlight_pixels = int(np.count_nonzero(highlight_mask))
+            shadow_pixels = int(np.count_nonzero(shadow_mask))
+
+            if highlight_pixels >= min_structure_pixels and highlight_pixels < pixel_count:
+                highlight_ratio = highlight_pixels / float(pixel_count)
+                if highlight_ratio <= 0.6:
+                    new_label = next_label
+                    next_label += 1
+                    labels_aug[highlight_mask] = new_label
+
+                    highlight_lab = centers_lab[int(base_label)].copy()
+                    highlight_lab[0] = float(
+                        np.clip(
+                            highlight_lab[0] + 6.5 + 9.5 * structure_strength,
+                            0.0,
+                            100.0,
+                        )
+                    )
+                    chroma_scale = 1.0 + 0.08 * structure_strength
+                    highlight_lab[1] = float(highlight_lab[1] * chroma_scale)
+                    highlight_lab[2] = float(highlight_lab[2] * chroma_scale)
+                    centers_list.append(highlight_lab)
+                    shading_annotations[new_label] = "highlight"
+
+            if shadow_pixels >= min_structure_pixels and shadow_pixels < pixel_count:
+                shadow_ratio = shadow_pixels / float(pixel_count)
+                if shadow_ratio <= 0.6:
+                    new_label = next_label
+                    next_label += 1
+                    labels_aug[shadow_mask] = new_label
+
+                    shadow_lab = centers_lab[int(base_label)].copy()
+                    shadow_lab[0] = float(
+                        np.clip(
+                            shadow_lab[0] - (7.5 + 8.5 * structure_strength),
+                            0.0,
+                            100.0,
+                        )
+                    )
+                    depth_scale = 1.0 + 0.06 * structure_strength
+                    shadow_lab[1] = float(shadow_lab[1] * depth_scale)
+                    shadow_lab[2] = float(shadow_lab[2] * depth_scale)
+                    centers_list.append(shadow_lab)
+                    shading_annotations[new_label] = "shadow"
+
+        if next_label != len(centers_lab):
+            centers_lab = np.asarray(centers_list, dtype=np.float32)
+            labels_full = labels_aug.astype(np.int32)
+            palette_rgb01 = lab2rgb(centers_lab.reshape(1, -1, 3)).reshape(-1, 3).clip(0, 1)
+            quant_rgb01 = palette_rgb01[labels_full]
+            quant_rgb01 = np.asarray(quant_rgb01, dtype=np.float32)
+
         # Analyse-Ergebnis für Debug/Preview merken
         self.last_color_analysis = {
             "preprocessed_rgb01": pre_rgb01,
@@ -1126,6 +1271,7 @@ class ImageAnalyzer:
             "centers_lab": centers_lab,
             "palette_rgb01": palette_rgb01,
             "quant_rgb01": quant_rgb01.astype(np.float32),
+            "shading_annotations": shading_annotations,
         }
 
         layers: List[Dict[str, Any]] = []
@@ -1167,7 +1313,20 @@ class ImageAnalyzer:
                 cleaned = mask
 
             base_spacing = max(1, int(round(min(orig_h, orig_w) / 180)))
-            spacing_px = int(np.clip(round(base_spacing * spacing_scale), 1, 15))
+            spacing_mod = 1.0
+            shading_kind = shading_annotations.get(int(li))
+            if shading_kind == "highlight":
+                spacing_mod = 0.65
+            elif shading_kind == "shadow":
+                spacing_mod = 0.75
+
+            spacing_px = int(
+                np.clip(
+                    round(base_spacing * spacing_scale * spacing_mod),
+                    1,
+                    15,
+                )
+            )
 
             paths = self.mask_to_offset_contours(
                 cleaned,
@@ -1206,6 +1365,7 @@ class ImageAnalyzer:
                 "pixel_paths": filtered_paths,
                 "label": int(li),
                 "_lab_l": float(centers_lab[int(li)][0]),
+                "shading": shading_annotations.get(int(li)),
             })
 
         layers = sorted(layers, key=lambda entry: entry["_lab_l"])
