@@ -295,7 +295,17 @@ class PaintingPipeline:
         stroke_plan = self._plan_strokes(dithered, palette, slic_segments, slic_compactness, stroke_spacing_px)
 
         simulation = self._render_simulation(palette, dithered.shape[:2])
-        post_processed = self._post_process_render(simulation, reference_rgb=calibrated)
+
+        # Run the painterly post process twice to guarantee the full refinement
+        # cycle described in the specification.  The second pass operates on the
+        # already enhanced output which mimics analysing and repainting the
+        # intermediate canvas once more for maximal fidelity.
+        post_processed_passes: List[np.ndarray] = []
+        post_pass_input = simulation
+        for _ in range(2):
+            post_pass_input = self._post_process_render(post_pass_input, reference_rgb=calibrated)
+            post_processed_passes.append(post_pass_input)
+        post_processed = post_processed_passes[-1] if post_processed_passes else simulation
 
         metrics = self._evaluate_quality(rgb01, post_processed)
 
@@ -318,6 +328,7 @@ class PaintingPipeline:
                 "stroke_spacing_px": stroke_spacing_px,
                 "calibration_profile": calibration_profile,
                 "palette_colors": palette_colors,
+                "post_process_passes": len(post_processed_passes) or 0,
             },
         )
 

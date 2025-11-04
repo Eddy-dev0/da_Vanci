@@ -1121,6 +1121,10 @@ class MainWindow(QMainWindow):
             f"{pipeline_profile.get('stroke_spacing_px', 'auto')}"
         )
 
+        post_passes = result.config.get("post_process_passes")
+        if isinstance(post_passes, int) and post_passes > 0:
+            lines.append(f"Post-Processing: {post_passes}x durchlaufen für maximale Veredelung.")
+
         metrics = result.metrics or {}
         ssim = metrics.get("ssim")
         if isinstance(ssim, (int, float)) and not np.isnan(ssim):
