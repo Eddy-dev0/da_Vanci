@@ -41,7 +41,7 @@ class MainWindow(QMainWindow):
         self.slicer = PainterSlicer()
 
         self.paint_styles: Dict[str, Dict[str, Any]] = self._build_style_profiles()
-        self.selected_style_key: str = "Galerie - Realismus"
+        self.selected_style_key: str = "Original"
         if not self.paint_styles:
             self.paint_styles = {
                 "Standard": {"analyzer": {}, "slicer": {}, "description": ""}
@@ -869,11 +869,11 @@ class MainWindow(QMainWindow):
                     "clean_interval": 4,
                 },
             },
-            "Meisterwerk - Hyperrealistisch+": {
+            "Classic Style": {
                 "description": (
-                    "Extrem fein abgestimmter Hyperrealismus mit maximaler "
-                    "Farb- und Detailtiefe, zusätzlicher Kantennachbearbeitung "
-                    "und noch dichterer Schichtstruktur für echte Premium-Resultate."
+                    "Zeitloser Klassik-Stil mit feinsten Übergängen, dichter "
+                    "Schichtstruktur und präzise nachgezeichneten Kanten für "
+                    "eine elegante Galerie-Anmutung."
                 ),
                 "analyzer": {
                     "k_min": 28,
@@ -892,6 +892,32 @@ class MainWindow(QMainWindow):
                 "slicer": {
                     "grid_mm": 0.15,
                     "num_glaze_passes": 7,
+                    "clean_interval": 2,
+                },
+            },
+            "Original": {
+                "description": (
+                    "Flaggschiff-Qualität mit maximaler Farbdifferenzierung, "
+                    "ultrafeiner Detailabstufung und erweitertem Layering "
+                    "für sichtbaren Qualitätszuwachs gegenüber allen anderen Profilen."
+                ),
+                "analyzer": {
+                    "k_min": 34,
+                    "k_max": 72,
+                    "use_dither": True,
+                    "min_path_length": 2,
+                    "min_area_ratio": 0.00012,
+                    "stroke_spacing_scale": 0.38,
+                    "preserve_edge_strokes": True,
+                    "detail_edge_boost": 2.05,
+                    "edge_sensitivity": 1.9,
+                    "background_stage_gain": 0.78,
+                    "mid_stage_gain": 1.18,
+                    "detail_stage_gain": 1.95,
+                },
+                "slicer": {
+                    "grid_mm": 0.12,
+                    "num_glaze_passes": 9,
                     "clean_interval": 2,
                 },
             },
