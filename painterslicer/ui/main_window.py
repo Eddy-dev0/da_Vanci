@@ -1,3 +1,4 @@
+import logging
 import os
 import sys
 from pathlib import Path
@@ -30,6 +31,9 @@ from painterslicer.image_analysis.pipeline import PaintingPipeline, PipelineResu
 from painterslicer.slicer.slicer_core import PainterSlicer
 
 
+LOGGER = logging.getLogger(__name__)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -58,6 +62,7 @@ class MainWindow(QMainWindow):
         self.last_pipeline_result: Optional[PipelineResult] = None
         self.last_pipeline_summary: List[str] = []
         self.pipeline_stroke_plan_mm: List[Dict[str, Any]] = []
+        self._superres_forced_off_reason: Optional[str] = None
 
         # Animation zurücksetzen
         # --- Animation / Preview State ---
@@ -1025,6 +1030,7 @@ class MainWindow(QMainWindow):
         """Führt optional die High-End-Pipeline aus und liefert das Analyse-Image."""
 
         pipeline_profile = pipeline_profile or {}
+        self._superres_forced_off_reason = None
         run_pipeline = bool(
             pipeline_profile.get("run_pipeline")
             or pipeline_profile.get("force_full_process")
@@ -1065,6 +1071,30 @@ class MainWindow(QMainWindow):
         for key in allowed_keys:
             if key in pipeline_profile and pipeline_profile[key] is not None:
                 pipeline_kwargs[key] = pipeline_profile[key]
+
+        if pipeline_kwargs.get("enable_superres"):
+            model_path = pipeline_kwargs.get("superres_model_path") or os.environ.get("PAINTER_REAL_ESRGAN_MODEL")
+            if not self.pipeline.super_resolution_available:
+                LOGGER.info("Super-Resolution deaktiviert: Real-ESRGAN nicht verfügbar.")
+                pipeline_kwargs["enable_superres"] = False
+                self._superres_forced_off_reason = (
+                    "Super-Resolution deaktiviert: Real-ESRGAN-Bibliothek nicht installiert."
+                )
+            elif not model_path:
+                LOGGER.info("Super-Resolution deaktiviert: Kein Real-ESRGAN-Modellpfad konfiguriert.")
+                pipeline_kwargs["enable_superres"] = False
+                self._superres_forced_off_reason = (
+                    "Super-Resolution deaktiviert: Es wurde kein Real-ESRGAN-Modellpfad konfiguriert."
+                )
+            elif model_path and not os.path.exists(model_path):
+                LOGGER.info(
+                    "Super-Resolution deaktiviert: Real-ESRGAN-Gewichte fehlen (Pfad: %s)",
+                    model_path,
+                )
+                pipeline_kwargs["enable_superres"] = False
+                self._superres_forced_off_reason = (
+                    "Super-Resolution deaktiviert: Real-ESRGAN-Modellgewichte wurden nicht gefunden."
+                )
 
         if "optimisation_passes" in pipeline_kwargs:
             try:
@@ -1112,6 +1142,9 @@ class MainWindow(QMainWindow):
         lines: List[str] = [
             "Original-Stil: Vollständige Bildverarbeitungs-, Mal- und Postprozess-Pipeline aktiv."
         ]
+
+        if self._superres_forced_off_reason:
+            lines.append(self._superres_forced_off_reason)
 
         if result.config.get("enable_superres"):
             scale = result.config.get("superres_scale", 1)
@@ -1488,11 +1521,15 @@ class MainWindow(QMainWindow):
 
         # Slider darf nie größer sein als letzter Stroke
         if hasattr(self, "progress_slider"):
-            self.progress_slider.setMaximum(slider_max)
-            if total_strokes == 0:
-                self.progress_slider.setValue(0)
-            else:
-                self.progress_slider.setValue(min(self.anim_stroke_index, slider_max))
+            previous_block = self.progress_slider.blockSignals(True)
+            try:
+                self.progress_slider.setMaximum(slider_max)
+                if total_strokes == 0:
+                    self.progress_slider.setValue(0)
+                else:
+                    self.progress_slider.setValue(min(self.anim_stroke_index, slider_max))
+            finally:
+                self.progress_slider.blockSignals(previous_block)
 
         if hasattr(self, "progress_label"):
             completed = min(self.anim_stroke_index, total_strokes)

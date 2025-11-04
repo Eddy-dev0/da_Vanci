@@ -235,6 +235,11 @@ class PaintingPipeline:
         self.analyzer = ImageAnalyzer()
         self._lpips_model = None
         self._realesrgan: Optional[RealESRGANer] = None
+        self._superres_supported = (
+            RealESRGANer is not None and RRDBNet is not None and torch is not None
+        )
+        self._superres_warning_emitted = False
+        self._superres_weights_warning_emitted = False
 
     # ------------------------------------------------------------------
     # Public API
@@ -270,17 +275,24 @@ class PaintingPipeline:
         rgb01 = self.analyzer._ensure_rgb01(image_source)
         rgb_linear = _linearise_srgb(rgb01)
 
-        denoised = self._denoise(rgb_linear, bilateral_diameter, bilateral_sigma_color, bilateral_sigma_space,
-                                 apply_guided_filter, guided_radius, guided_eps)
+        denoised = self._denoise(
+            rgb_linear,
+            bilateral_diameter,
+            bilateral_sigma_color,
+            bilateral_sigma_space,
+            apply_guided_filter,
+            guided_radius,
+            guided_eps,
+        )
 
+        sr = denoised
+        superres_applied = False
         if enable_superres:
-            sr = self._run_super_resolution(
+            sr, superres_applied = self._run_super_resolution(
                 denoised,
                 scale=superres_scale,
                 model_path=superres_model_path,
             )
-        else:
-            sr = denoised
 
         tone_mapped = self._apply_clahe_and_sharpen(sr, clahe_clip_limit, clahe_grid_size, sharpen_amount)
 
@@ -319,7 +331,7 @@ class PaintingPipeline:
             post_processed_rgb=post_processed,
             metrics=metrics,
             config={
-                "enable_superres": enable_superres,
+                "enable_superres": enable_superres and superres_applied,
                 "superres_scale": superres_scale,
                 "dither": dither,
                 "palette_size": palette_size,
@@ -365,27 +377,39 @@ class PaintingPipeline:
         filtered = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
         return _linearise_srgb(np.clip(filtered, 0.0, 1.0))
 
+    @property
+    def super_resolution_available(self) -> bool:
+        """Return ``True`` if the Real-ESRGAN stack can be used."""
+
+        return self._superres_supported
+
     def _run_super_resolution(
         self,
         rgb_linear: np.ndarray,
         *,
         scale: int,
         model_path: Optional[str],
-    ) -> np.ndarray:
-        if RealESRGANer is None or RRDBNet is None or torch is None:
-            LOGGER.warning("Real-ESRGAN not available – skipping super-resolution.")
-            return rgb_linear
+    ) -> Tuple[np.ndarray, bool]:
+        if not self._superres_supported:
+            if not self._superres_warning_emitted:
+                LOGGER.warning("Real-ESRGAN not available – skipping super-resolution.")
+                self._superres_warning_emitted = True
+            return rgb_linear, False
 
         if self._realesrgan is None:
             model = _sr_default_model(scale)
             if model is None:
-                LOGGER.warning("RRDBNet arch unavailable – skipping super-resolution.")
-                return rgb_linear
+                if not self._superres_warning_emitted:
+                    LOGGER.warning("RRDBNet arch unavailable – skipping super-resolution.")
+                    self._superres_warning_emitted = True
+                return rgb_linear, False
 
             model_path = model_path or os.environ.get("PAINTER_REAL_ESRGAN_MODEL")
             if not model_path or not os.path.exists(model_path):
-                LOGGER.warning("Real-ESRGAN model weights missing – skipping super-resolution.")
-                return rgb_linear
+                if not self._superres_weights_warning_emitted:
+                    LOGGER.warning("Real-ESRGAN model weights missing – skipping super-resolution.")
+                    self._superres_weights_warning_emitted = True
+                return rgb_linear, False
 
             self._realesrgan = RealESRGANer(
                 scale=scale,
@@ -399,10 +423,10 @@ class PaintingPipeline:
             output, _ = self._realesrgan.enhance(bgr)
         except RuntimeError as exc:  # pragma: no cover - GPU/weight issues
             LOGGER.warning("Real-ESRGAN inference failed: %s", exc)
-            return rgb_linear
+            return rgb_linear, False
 
         rgb = cv2.cvtColor(output, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
-        return _linearise_srgb(np.clip(rgb, 0.0, 1.0))
+        return _linearise_srgb(np.clip(rgb, 0.0, 1.0)), True
 
     def _apply_clahe_and_sharpen(
         self,
