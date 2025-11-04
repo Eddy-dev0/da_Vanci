@@ -537,6 +537,9 @@ class ImageAnalyzer:
             "preserve_edge_strokes": style_profile.get("preserve_edge_strokes", False),
             "detail_edge_boost": style_profile.get("detail_edge_boost", 1.0),
             "edge_sensitivity": style_profile.get("edge_sensitivity", 1.0),
+            "microtransition_boost": style_profile.get("microtransition_boost", 1.0),
+            "chroma_boost": style_profile.get("chroma_boost", 1.0),
+            "highlight_boost": style_profile.get("highlight_boost", 0.0),
         }
 
         color_layers = self.extract_color_layers(
@@ -592,6 +595,12 @@ class ImageAnalyzer:
         stage_priority = {"background": 0, "mid": 1, "detail": 2}
 
         planned_layers: List[Dict[str, Any]] = []
+
+        highlight_bias = float(np.clip(style_profile.get("highlight_bias", 1.0), 0.2, 3.0))
+        shadow_bias = float(np.clip(style_profile.get("shadow_bias", 1.0), 0.2, 3.0))
+        color_variance_bias = float(
+            np.clip(style_profile.get("color_variance_bias", 1.0), 0.2, 3.0)
+        )
 
         for layer in color_layers:
             label = int(layer["label"])
@@ -663,6 +672,14 @@ class ImageAnalyzer:
                                 1.0,
                             )
                         )
+
+            highlight_strength = float(
+                np.clip(highlight_strength * highlight_bias, 0.0, 1.0)
+            )
+            shadow_strength = float(np.clip(shadow_strength * shadow_bias, 0.0, 1.0))
+            color_variance_strength = float(
+                np.clip(color_variance_strength * color_variance_bias, 0.0, 1.0)
+            )
 
             ratios = {
                 "background": 0.5 * background_ratio + 0.5 * background_strength,
@@ -939,6 +956,9 @@ class ImageAnalyzer:
         preserve_edge_strokes: bool = False,
         detail_edge_boost: float = 1.0,
         edge_sensitivity: float = 1.0,
+        microtransition_boost: float = 1.0,
+        chroma_boost: float = 1.0,
+        highlight_boost: float = 0.0,
     ) -> List[Dict[str, Any]]:
         """
         Analysiert ein Bild (Dateipfad oder RGB-Array) und erzeugt
@@ -955,7 +975,10 @@ class ImageAnalyzer:
 
         Parameter wie ``stroke_spacing_scale`` und ``detail_edge_boost`` ermöglichen
         es, deutlich feinere Schraffuren sowie zusätzliche Kantenspuren zu erzeugen,
-        wodurch einzelne Pinselstriche besser nachvollzogen werden können.
+        wodurch einzelne Pinselstriche besser nachvollzogen werden können. Über
+        ``microtransition_boost``, ``chroma_boost`` und ``highlight_boost`` lassen
+        sich außerdem Übergänge verdichten, Farbakzente verstärken und Lichter
+        gezielt anheben.
         """
 
         enhanced_bgr = self.enhance_image_quality(image_source)
@@ -967,6 +990,11 @@ class ImageAnalyzer:
         spacing_scale = float(np.clip(stroke_spacing_scale, 0.2, 2.5))
         edge_sense = float(np.clip(edge_sensitivity, 0.25, 4.0))
         min_area_ratio = float(np.clip(min_area_ratio, 1e-6, 0.01))
+        micro_boost = float(np.clip(microtransition_boost, 0.5, 3.0))
+        chroma_boost = float(np.clip(chroma_boost, 0.5, 2.5))
+        highlight_boost = float(np.clip(highlight_boost, 0.0, 1.5))
+
+        detail_scale *= micro_boost
 
         img_u8 = (img_srgb01.clip(0, 1) * 255).astype(np.uint8)
         img_gray_u8 = cv2.cvtColor(img_u8, cv2.COLOR_RGB2GRAY)
@@ -976,7 +1004,7 @@ class ImageAnalyzer:
         # Hohe Auflösung bremst KMeans stark aus. Um UI-Timeouts zu vermeiden,
         # rechnen wir auf einer verkleinerten Kopie (max_dim Pixel) und
         # skalieren die Ergebnisse anschließend wieder auf die Originalgröße.
-        max_dim = int(800 * float(np.clip(np.sqrt(detail_scale), 1.0, 1.8)))
+        max_dim = int(800 * float(np.clip(np.sqrt(detail_scale), 1.0, 2.1)))
         if max(orig_h, orig_w) > max_dim:
             scale = max_dim / float(max(orig_h, orig_w))
             new_w = max(1, int(round(orig_w * scale)))
@@ -1002,12 +1030,22 @@ class ImageAnalyzer:
         smooth = cv2.bilateralFilter(rgb_cv, d=9, sigmaColor=75, sigmaSpace=75)
         pre_rgb01 = (smooth.astype(np.float32) / 255.0).clip(0, 1)
 
+        if chroma_boost != 1.0 or highlight_boost > 0.0:
+            hsv = cv2.cvtColor(pre_rgb01.astype(np.float32), cv2.COLOR_RGB2HSV)
+            if chroma_boost != 1.0:
+                hsv[..., 1] = np.clip(hsv[..., 1] * chroma_boost, 0.0, 1.0)
+            if highlight_boost > 0.0:
+                v = hsv[..., 2]
+                v = np.clip(v + highlight_boost * np.power(v, 2.2), 0.0, 1.0)
+                hsv[..., 2] = v
+            pre_rgb01 = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB).clip(0.0, 1.0)
+
         lab = rgb2lab(pre_rgb01)
         H, W, _ = lab.shape
 
         base_segments = (H * W) / 1800
-        target_segments = int(np.clip(base_segments * detail_scale, 200, 2400))
-        slic_compactness = float(np.clip(12.0 / max(detail_scale, 0.5), 6.0, 18.0))
+        target_segments = int(np.clip(base_segments * detail_scale, 220, 3600))
+        slic_compactness = float(np.clip(12.0 / max(detail_scale, 0.5), 5.0, 18.0))
         segments = slic(
             pre_rgb01,
             n_segments=target_segments,
