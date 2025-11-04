@@ -1,4 +1,4 @@
-from typing import Dict, Any, List, Tuple
+from typing import Dict, Any, List, Tuple, Optional
 import cv2
 from painterslicer.config.config_loader import load_machine_config, load_brush_presets
 import numpy as np
@@ -23,6 +23,7 @@ class PainterSlicer:
         # slicer/slicer_core.py (im SlicerCore oder deiner Slicer-Klasse)
         self.grid_mm = 0.3  # vorher evtl. 1.0; feiner = mehr Details
         self.num_glaze_passes = 3  # 2..3 bringt sichtbare Glätte
+        self.clean_interval_default = 5
 
         # Z-Default: benutze home_position.z als Z_UP, paint_z_mm als Z_DOWN-Position (wenn gesetzt)
         self.z_up_default = float(self.machine_cfg.get("home_position", {}).get("z", 50.0))
@@ -30,6 +31,33 @@ class PainterSlicer:
 
         # brush presets
         self.brush_presets = load_brush_presets()
+
+    def apply_style_profile(self, profile: Optional[Dict[str, Any]]):
+        """Übernimmt Stil-Parameter für den Slicer (Raster, Glaze-Pässe, Reinigung)."""
+
+        if not profile:
+            return
+
+        grid_mm = profile.get("grid_mm")
+        if grid_mm is not None:
+            try:
+                self.grid_mm = float(grid_mm)
+            except (TypeError, ValueError):
+                pass
+
+        glaze_passes = profile.get("num_glaze_passes")
+        if glaze_passes is not None:
+            try:
+                self.num_glaze_passes = max(1, int(glaze_passes))
+            except (TypeError, ValueError):
+                pass
+
+        clean_interval = profile.get("clean_interval")
+        if clean_interval is not None:
+            try:
+                self.clean_interval_default = max(1, int(clean_interval))
+            except (TypeError, ValueError):
+                pass
 
     def generate_paint_plan(self, layer_masks: Dict[str, Any]) -> dict:
         plan = [
@@ -246,7 +274,7 @@ class PainterSlicer:
         pressure: float,
         z_up: float,
         z_down: float,
-        clean_interval: int = 5
+        clean_interval: Optional[int] = None
     ) -> str:
         """
         Erzeugt PaintCode für MEHRERE Farblayer.
@@ -265,6 +293,9 @@ class PainterSlicer:
         # hole Stationsdaten
         brush_meta = self.brush_presets.get(tool_name, {})
         needs_cleaning = bool(brush_meta.get("needs_cleaning", True))
+
+        if clean_interval is None:
+            clean_interval = int(self.clean_interval_default)
 
         pal = self.machine_cfg.get("palette_station", {"x": 0, "y": 0, "z": z_down})
         wash = self.machine_cfg.get("wash_station", {"x": 0, "y": 0, "z": z_up})

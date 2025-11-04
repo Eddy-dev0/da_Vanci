@@ -277,6 +277,7 @@ class ImageAnalyzer:
         k_colors: Optional[int] = None,
         k_min: int = 8,
         k_max: int = 16,
+        style_profile: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """
         Erzeugt einen heuristischen Malplan von groben zu feinen Schichten.
@@ -324,11 +325,24 @@ class ImageAnalyzer:
         background_score_map = score_maps.get("background")
         texture_score_map = score_maps.get("texture")
 
+        style_profile = style_profile or {}
+
+        extract_kwargs: Dict[str, Any] = {
+            "k_colors": style_profile.get("k_colors", k_colors),
+            "k_min": style_profile.get("k_min", k_min),
+            "k_max": style_profile.get("k_max", k_max),
+            "use_dither": style_profile.get("use_dither", True),
+            "min_path_length": style_profile.get("min_path_length", 2),
+            "min_area_ratio": style_profile.get("min_area_ratio", 0.0005),
+            "stroke_spacing_scale": style_profile.get("stroke_spacing_scale", 1.0),
+            "preserve_edge_strokes": style_profile.get("preserve_edge_strokes", False),
+            "detail_edge_boost": style_profile.get("detail_edge_boost", 1.0),
+            "edge_sensitivity": style_profile.get("edge_sensitivity", 1.0),
+        }
+
         color_layers = self.extract_color_layers(
             img_rgb01,
-            k_colors=k_colors,
-            k_min=k_min,
-            k_max=k_max,
+            **extract_kwargs,
         )
 
         labels = None
@@ -469,6 +483,9 @@ class ImageAnalyzer:
                 + 0.2 * contrast_strength
                 + 0.15 * color_variance_strength,
             }
+            stage_scores["background"] *= float(style_profile.get("background_stage_gain", 1.0))
+            stage_scores["mid"] *= float(style_profile.get("mid_stage_gain", 1.0))
+            stage_scores["detail"] *= float(style_profile.get("detail_stage_gain", 1.0))
             stage = max(stage_scores, key=stage_scores.get)
 
             path_count = len(layer["pixel_paths"])
@@ -718,6 +735,11 @@ class ImageAnalyzer:
         k_max: int = 16,
         use_dither: bool = True,
         min_path_length: int = 2,
+        min_area_ratio: float = 0.0005,
+        stroke_spacing_scale: float = 1.0,
+        preserve_edge_strokes: bool = False,
+        detail_edge_boost: float = 1.0,
+        edge_sensitivity: float = 1.0,
     ) -> List[Dict[str, Any]]:
         """
         Analysiert ein Bild (Dateipfad oder RGB-Array) und erzeugt
@@ -731,15 +753,27 @@ class ImageAnalyzer:
 
         Zusätzlich wird das letzte Analyse-Ergebnis in
         ``self.last_color_analysis`` abgelegt (z.B. für Preview-Zwecke).
+
+        Parameter wie ``stroke_spacing_scale`` und ``detail_edge_boost`` ermöglichen
+        es, deutlich feinere Schraffuren sowie zusätzliche Kantenspuren zu erzeugen,
+        wodurch einzelne Pinselstriche besser nachvollzogen werden können.
         """
 
         img_srgb01 = self._ensure_rgb01(image_source)
+        detail_scale = float(np.clip(detail_edge_boost, 0.3, 4.0))
+        spacing_scale = float(np.clip(stroke_spacing_scale, 0.2, 2.5))
+        edge_sense = float(np.clip(edge_sensitivity, 0.25, 4.0))
+        min_area_ratio = float(np.clip(min_area_ratio, 1e-6, 0.01))
+
+        img_u8 = (img_srgb01.clip(0, 1) * 255).astype(np.uint8)
+        img_gray_u8 = cv2.cvtColor(img_u8, cv2.COLOR_RGB2GRAY)
+
         orig_h, orig_w = img_srgb01.shape[:2]
 
         # Hohe Auflösung bremst KMeans stark aus. Um UI-Timeouts zu vermeiden,
         # rechnen wir auf einer verkleinerten Kopie (max_dim Pixel) und
         # skalieren die Ergebnisse anschließend wieder auf die Originalgröße.
-        max_dim = 800
+        max_dim = int(800 * float(np.clip(np.sqrt(detail_scale), 1.0, 1.8)))
         if max(orig_h, orig_w) > max_dim:
             scale = max_dim / float(max(orig_h, orig_w))
             new_w = max(1, int(round(orig_w * scale)))
@@ -768,11 +802,13 @@ class ImageAnalyzer:
         lab = rgb2lab(pre_rgb01)
         H, W, _ = lab.shape
 
-        target_segments = int(np.clip((H * W) / 1800, 200, 1600))
+        base_segments = (H * W) / 1800
+        target_segments = int(np.clip(base_segments * detail_scale, 200, 2400))
+        slic_compactness = float(np.clip(12.0 / max(detail_scale, 0.5), 6.0, 18.0))
         segments = slic(
             pre_rgb01,
             n_segments=target_segments,
-            compactness=12,
+            compactness=slic_compactness,
             sigma=1,
             start_label=0,
         ).astype(np.int32)
@@ -799,7 +835,8 @@ class ImageAnalyzer:
 
         mean_lab_valid = mean_lab[valid_indices]
 
-        k_auto = int(np.clip(int(np.sqrt(H * W) / 300), k_min, k_max))
+        k_auto_estimate = (np.sqrt(H * W) / 300.0) * max(detail_scale, 0.6)
+        k_auto = int(np.clip(int(round(k_auto_estimate)), k_min, k_max))
         k_auto = max(1, min(k_auto, mean_lab_valid.shape[0]))
 
         km = KMeans(n_clusters=k_auto, n_init="auto", random_state=0).fit(mean_lab_valid)
@@ -849,8 +886,11 @@ class ImageAnalyzer:
         layers: List[Dict[str, Any]] = []
         unique_labels = np.unique(labels_full)
 
-        kernel = np.ones((3, 3), np.uint8)
-        min_area = max(int(0.0005 * orig_h * orig_w), 64)
+        kernel_size = int(np.clip(round(3 / max(detail_scale, 0.5)), 1, 5))
+        if kernel_size % 2 == 0:
+            kernel_size += 1
+        kernel = np.ones((kernel_size, kernel_size), np.uint8)
+        min_area = max(int(min_area_ratio * orig_h * orig_w), 32)
 
         def _remove_small_regions(mask_arr: np.ndarray, min_pixels: int) -> np.ndarray:
             num_labels, labels_im, stats, _ = cv2.connectedComponentsWithStats(
@@ -864,6 +904,11 @@ class ImageAnalyzer:
                     cleaned_mask[labels_im == comp_id] = 255
             return cleaned_mask
 
+        blur_kernel = int(np.clip(3 + (1 if detail_scale < 1.0 else 0), 3, 7))
+        if blur_kernel % 2 == 0:
+            blur_kernel += 1
+        blurred_gray = cv2.GaussianBlur(img_gray_u8, (blur_kernel, blur_kernel), 0)
+
         for li in unique_labels:
             mask = (labels_full == li).astype(np.uint8) * 255
 
@@ -876,8 +921,8 @@ class ImageAnalyzer:
             if cleaned.max() == 0:
                 cleaned = mask
 
-            spacing_px = int(round(min(orig_h, orig_w) / 180))
-            spacing_px = int(np.clip(spacing_px, 3, 11))
+            base_spacing = max(1, int(round(min(orig_h, orig_w) / 180)))
+            spacing_px = int(np.clip(round(base_spacing * spacing_scale), 1, 15))
 
             paths = self.mask_to_offset_contours(
                 cleaned,
@@ -889,6 +934,23 @@ class ImageAnalyzer:
             filtered_paths = [
                 path for path in paths if len(path) >= min_path_length
             ]
+
+            if preserve_edge_strokes:
+                low_thr = int(np.clip(32 / edge_sense, 6, 120))
+                high_thr = int(np.clip(140 / edge_sense, low_thr + 10, 255))
+                edge_mask = cv2.Canny(blurred_gray, low_thr, high_thr)
+                edge_mask = cv2.bitwise_and(edge_mask, cleaned)
+                if detail_scale > 1.0:
+                    extra_iter = int(np.clip(round(detail_scale - 1.0), 1, 3))
+                    edge_mask = cv2.dilate(
+                        edge_mask,
+                        np.ones((3, 3), np.uint8),
+                        iterations=extra_iter,
+                    )
+                edge_paths = self.extract_paths_from_mask(edge_mask)
+                for path in edge_paths:
+                    if len(path) >= 2:
+                        filtered_paths.append(path)
 
             color_rgb = tuple(
                 int(np.clip(round(c * 255), 0, 255)) for c in palette_rgb01[int(li)]
