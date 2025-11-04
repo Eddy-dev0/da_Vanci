@@ -22,9 +22,11 @@ from PySide6.QtWidgets import (
 from PySide6.QtGui import QIcon, QAction, QPixmap, QImage, QPainter, QPen, QColor
 from PySide6.QtCore import Qt, QTimer
 
+import cv2
 import numpy as np
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional, Tuple
 from painterslicer.image_analysis.analyzer import ImageAnalyzer
+from painterslicer.image_analysis.pipeline import PaintingPipeline, PipelineResult
 from painterslicer.slicer.slicer_core import PainterSlicer
 
 
@@ -39,6 +41,7 @@ class MainWindow(QMainWindow):
         # Analyzer / Slicer Objekte
         self.analyzer = ImageAnalyzer()
         self.slicer = PainterSlicer()
+        self.pipeline = PaintingPipeline()
 
         self.paint_styles: Dict[str, Dict[str, Any]] = self._build_style_profiles()
         self.selected_style_key: str = "Original"
@@ -49,7 +52,12 @@ class MainWindow(QMainWindow):
         if self.selected_style_key not in self.paint_styles:
             self.selected_style_key = next(iter(self.paint_styles.keys()))
         self.active_style_profile: Dict[str, Any] = {}
+        self.active_pipeline_profile: Dict[str, Any] = {}
         self._apply_style_profile(self.selected_style_key)
+
+        self.last_pipeline_result: Optional[PipelineResult] = None
+        self.last_pipeline_summary: List[str] = []
+        self.pipeline_stroke_plan_mm: List[Dict[str, Any]] = []
 
         # Animation zurücksetzen
         # --- Animation / Preview State ---
@@ -375,10 +383,30 @@ class MainWindow(QMainWindow):
         # 1. Farb- und Layer-Planung (liefert Masken + Farblayer)
         analyzer_style: Dict[str, Any] = {}
         slicer_style: Dict[str, Any] = {}
+        pipeline_style: Dict[str, Any] = {}
         if getattr(self, "active_style_profile", None):
             analyzer_style = dict(self.active_style_profile.get("analyzer", {}))
             slicer_style = dict(self.active_style_profile.get("slicer", {}))
             self.slicer.apply_style_profile(slicer_style)
+            pipeline_style = dict(self.active_style_profile.get("pipeline", {}))
+
+        planning_source: Any = self.current_image_path
+        pipeline_summary: List[str] = []
+        if pipeline_style:
+            try:
+                planning_source, pipeline_summary = self._prepare_planning_source(
+                    self.current_image_path,
+                    pipeline_style,
+                )
+            except Exception as exc:
+                planning_source = self.current_image_path
+                self.last_pipeline_result = None
+                self.last_pipeline_summary = []
+                self.pipeline_stroke_plan_mm = []
+                pipeline_summary = [
+                    "High-Fidelity-Pipeline konnte nicht vollständig ausgeführt werden.",
+                    f"Fehler: {exc}",
+                ]
 
         try:
             planning_kwargs: Dict[str, Any] = {
@@ -390,7 +418,7 @@ class MainWindow(QMainWindow):
                 planning_kwargs["k_colors"] = analyzer_style.get("k_colors")
 
             planning_result = self.analyzer.plan_painting_layers(
-                self.current_image_path,
+                planning_source,
                 **planning_kwargs,
             )
         except Exception as exc:
@@ -498,6 +526,10 @@ class MainWindow(QMainWindow):
             desc = style_profile.get("description")
             if desc:
                 lines_out.append(desc)
+            lines_out.append("")
+        if pipeline_summary:
+            lines_out.append("--- High-Fidelity Pipeline ---")
+            lines_out.extend(pipeline_summary)
             lines_out.append("")
         lines_out.extend(plan_lines)
         lines_out.append("\n--- Farb-Layer Info ---\n")
@@ -945,6 +977,27 @@ class MainWindow(QMainWindow):
                     "num_glaze_passes": 9,
                     "clean_interval": 2,
                 },
+                "pipeline": {
+                    "run_pipeline": True,
+                    "enable_superres": True,
+                    "superres_scale": 2,
+                    "apply_guided_filter": True,
+                    "guided_radius": 9,
+                    "guided_eps": 1e-4,
+                    "bilateral_diameter": 11,
+                    "bilateral_sigma_color": 90.0,
+                    "bilateral_sigma_space": 90.0,
+                    "clahe_clip_limit": 2.8,
+                    "clahe_grid_size": 8,
+                    "sharpen_amount": 0.42,
+                    "palette_size": 24,
+                    "dither": "floyd_steinberg",
+                    "slic_segments": 620,
+                    "slic_compactness": 20.0,
+                    "stroke_spacing_px": 2,
+                    "optimisation_passes": 1,
+                    "target_metrics": {"ssim": 0.985, "lpips": 0.045},
+                },
             },
         }
 
@@ -955,8 +1008,181 @@ class MainWindow(QMainWindow):
 
         self.selected_style_key = style_key
         self.active_style_profile = profile
+        self.active_pipeline_profile = dict(profile.get("pipeline", {}))
         slicer_profile = profile.get("slicer", {})
         self.slicer.apply_style_profile(slicer_profile)
+
+    def _prepare_planning_source(
+        self,
+        image_source: str,
+        pipeline_profile: Dict[str, Any],
+    ) -> Tuple[Any, List[str]]:
+        """Führt optional die High-End-Pipeline aus und liefert das Analyse-Image."""
+
+        pipeline_profile = pipeline_profile or {}
+        run_pipeline = bool(
+            pipeline_profile.get("run_pipeline")
+            or pipeline_profile.get("force_full_process")
+            or pipeline_profile.get("enable_superres")
+        )
+
+        if not run_pipeline:
+            self.last_pipeline_result = None
+            self.last_pipeline_summary = []
+            self.pipeline_stroke_plan_mm = []
+            return image_source, []
+
+        allowed_keys = {
+            "enable_superres",
+            "superres_scale",
+            "superres_model_path",
+            "bilateral_diameter",
+            "bilateral_sigma_color",
+            "bilateral_sigma_space",
+            "guided_radius",
+            "guided_eps",
+            "apply_guided_filter",
+            "clahe_clip_limit",
+            "clahe_grid_size",
+            "sharpen_amount",
+            "calibration_profile",
+            "palette_size",
+            "palette_colors",
+            "dither",
+            "slic_segments",
+            "slic_compactness",
+            "stroke_spacing_px",
+            "target_metrics",
+            "optimisation_passes",
+        }
+
+        pipeline_kwargs: Dict[str, Any] = {}
+        for key in allowed_keys:
+            if key in pipeline_profile and pipeline_profile[key] is not None:
+                pipeline_kwargs[key] = pipeline_profile[key]
+
+        if "optimisation_passes" in pipeline_kwargs:
+            try:
+                pipeline_kwargs["optimisation_passes"] = int(pipeline_kwargs["optimisation_passes"])
+            except (TypeError, ValueError):
+                pipeline_kwargs.pop("optimisation_passes", None)
+
+        result = self.pipeline.process(image_source, **pipeline_kwargs)
+        self.last_pipeline_result = result
+
+        summary = self._make_pipeline_summary(result, pipeline_profile)
+        self.last_pipeline_summary = summary
+
+        processed_rgb = (
+            np.asarray(result.post_processed_rgb, dtype=np.float32)
+            if getattr(result, "post_processed_rgb", None) is not None
+            else np.empty((0, 0, 3), dtype=np.float32)
+        )
+        if processed_rgb.size == 0 and getattr(result, "calibrated_rgb", None) is not None:
+            processed_rgb = np.asarray(result.calibrated_rgb, dtype=np.float32)
+        if processed_rgb.size == 0:
+            processed_rgb = self.analyzer._ensure_rgb01(image_source)
+        if processed_rgb.size and float(processed_rgb.max()) > 1.0:
+            processed_rgb = processed_rgb / 255.0
+
+        base_rgb = self.analyzer._ensure_rgb01(image_source)
+        base_h, base_w = base_rgb.shape[:2]
+
+        if processed_rgb.shape[:2] != (base_h, base_w):
+            processed_rgb = cv2.resize(
+                processed_rgb,
+                (base_w, base_h),
+                interpolation=cv2.INTER_CUBIC,
+            )
+
+        self._build_pipeline_timeline(result, base_w, base_h)
+
+        return processed_rgb, summary
+
+    def _make_pipeline_summary(
+        self,
+        result: PipelineResult,
+        pipeline_profile: Dict[str, Any],
+    ) -> List[str]:
+        lines: List[str] = [
+            "Original-Stil: Vollständige Bildverarbeitungs-, Mal- und Postprozess-Pipeline aktiv."
+        ]
+
+        if result.config.get("enable_superres"):
+            scale = result.config.get("superres_scale", 1)
+            lines.append(f"Super-Resolution aktiv (Skalierung {scale}x).")
+
+        palette_colors = 0
+        dither_method = result.config.get("dither", "-")
+        if result.palette and getattr(result.palette, "palette_rgb", None) is not None:
+            palette_colors = int(result.palette.palette_rgb.shape[0])
+        lines.append(
+            f"Palette: {palette_colors} Farben | Dither: {dither_method} | Stroke-Abstand px: "
+            f"{pipeline_profile.get('stroke_spacing_px', 'auto')}"
+        )
+
+        metrics = result.metrics or {}
+        ssim = metrics.get("ssim")
+        if isinstance(ssim, (int, float)) and not np.isnan(ssim):
+            lines.append(f"Qualität (SSIM): {ssim:.4f}")
+        lpips_val = metrics.get("lpips")
+        if isinstance(lpips_val, (int, float)) and not np.isnan(lpips_val):
+            lines.append(f"Perzeptuelle Abweichung (LPIPS): {lpips_val:.4f}")
+
+        stroke_count = len(result.stroke_plan) if result.stroke_plan else 0
+        lines.append(f"Generierte Stroke-Instruktionen: {stroke_count}")
+
+        return lines
+
+    def _build_pipeline_timeline(
+        self,
+        result: PipelineResult,
+        base_w: int,
+        base_h: int,
+    ) -> None:
+        self.pipeline_stroke_plan_mm = []
+        if not result or not result.stroke_plan:
+            return
+
+        dithered = getattr(result, "dithered_rgb", None)
+        if dithered is None or getattr(dithered, "shape", None) is None:
+            return
+
+        plan_h, plan_w = dithered.shape[:2]
+        if plan_w == 0 or plan_h == 0:
+            return
+
+        scale_x = float(base_w) / float(plan_w)
+        scale_y = float(base_h) / float(plan_h)
+
+        converted: List[Dict[str, Any]] = []
+        for instr in result.stroke_plan:
+            path = getattr(instr, "path", None)
+            if not path or len(path) < 2:
+                continue
+
+            mm_path: List[Tuple[float, float]] = []
+            for x_px, y_px in path:
+                orig_x = float(x_px) * scale_x
+                orig_y = float(y_px) * scale_y
+                X_mm = (orig_x / base_w) * self.slicer.work_w_mm
+                Y_mm = (orig_y / base_h) * self.slicer.work_h_mm
+                mm_path.append((X_mm, Y_mm))
+
+            if len(mm_path) < 2:
+                continue
+
+            converted.append(
+                {
+                    "color_rgb": getattr(instr, "color_rgb", (0, 0, 0)),
+                    "stage": getattr(instr, "stage", ""),
+                    "technique": getattr(instr, "technique", ""),
+                    "tool": getattr(instr, "tool", ""),
+                    "points": mm_path,
+                }
+            )
+
+        self.pipeline_stroke_plan_mm = converted
 
     def _update_style_description(self) -> None:
         if not hasattr(self, "style_description_label"):
