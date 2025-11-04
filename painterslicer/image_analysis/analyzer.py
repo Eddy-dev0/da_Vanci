@@ -917,7 +917,32 @@ class ImageAnalyzer:
 
             for cnt in contours:
                 cnt = cnt.squeeze(axis=1)
-                if len(cnt.shape) != 2 or cnt.shape[0] < min_len:
+                if len(cnt.shape) != 2 or cnt.shape[0] == 0:
+                    continue
+
+                if cnt.shape[0] < min_len:
+                    # Kleine Inseln würden sonst als einzelne Pixel übrig bleiben.
+                    # Wir erzeugen daher einen winzigen Diamant-Pfad um den Schwerpunkt,
+                    # damit die Fläche vollständig gefüllt wird.
+                    cx = int(np.round(cnt[:, 0].mean()))
+                    cy = int(np.round(cnt[:, 1].mean()))
+                    radius = max(1, spacing_px // 2)
+
+                    def clamp(v, limit):
+                        return int(max(0, min(limit - 1, v)))
+
+                    h, w = current.shape[:2]
+                    cx = clamp(cx, w)
+                    cy = clamp(cy, h)
+                    r = radius
+                    diamond = [
+                        (clamp(cx - r, w), cy),
+                        (cx, clamp(cy + r, h)),
+                        (clamp(cx + r, w), cy),
+                        (cx, clamp(cy - r, h)),
+                        (clamp(cx - r, w), cy),
+                    ]
+                    paths.append(diamond)
                     continue
 
                 path = [(int(x), int(y)) for (x, y) in cnt]
