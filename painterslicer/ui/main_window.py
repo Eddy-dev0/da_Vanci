@@ -837,6 +837,12 @@ class MainWindow(QMainWindow):
                     "background_stage_gain": 0.95,
                     "mid_stage_gain": 1.0,
                     "detail_stage_gain": 1.1,
+                    "microtransition_boost": 1.0,
+                    "chroma_boost": 1.0,
+                    "highlight_boost": 0.05,
+                    "highlight_bias": 1.0,
+                    "shadow_bias": 1.0,
+                    "color_variance_bias": 1.0,
                 },
                 "slicer": {
                     "grid_mm": 0.26,
@@ -862,6 +868,12 @@ class MainWindow(QMainWindow):
                     "background_stage_gain": 0.9,
                     "mid_stage_gain": 1.05,
                     "detail_stage_gain": 1.35,
+                    "microtransition_boost": 1.15,
+                    "chroma_boost": 1.08,
+                    "highlight_boost": 0.12,
+                    "highlight_bias": 1.15,
+                    "shadow_bias": 1.05,
+                    "color_variance_bias": 1.1,
                 },
                 "slicer": {
                     "grid_mm": 0.22,
@@ -888,6 +900,12 @@ class MainWindow(QMainWindow):
                     "background_stage_gain": 0.82,
                     "mid_stage_gain": 1.15,
                     "detail_stage_gain": 1.7,
+                    "microtransition_boost": 1.28,
+                    "chroma_boost": 1.14,
+                    "highlight_boost": 0.18,
+                    "highlight_bias": 1.35,
+                    "shadow_bias": 1.15,
+                    "color_variance_bias": 1.25,
                 },
                 "slicer": {
                     "grid_mm": 0.15,
@@ -898,8 +916,9 @@ class MainWindow(QMainWindow):
             "Original": {
                 "description": (
                     "Flaggschiff-Qualität mit maximaler Farbdifferenzierung, "
-                    "ultrafeiner Detailabstufung und erweitertem Layering "
-                    "für sichtbaren Qualitätszuwachs gegenüber allen anderen Profilen."
+                    "ultrafeiner Detailabstufung, verstärkten Highlights und "
+                    "erweitertem Layering für sichtbaren Qualitätszuwachs "
+                    "gegenüber allen anderen Profilen."
                 ),
                 "analyzer": {
                     "k_min": 34,
@@ -914,6 +933,12 @@ class MainWindow(QMainWindow):
                     "background_stage_gain": 0.78,
                     "mid_stage_gain": 1.18,
                     "detail_stage_gain": 1.95,
+                    "microtransition_boost": 1.42,
+                    "chroma_boost": 1.22,
+                    "highlight_boost": 0.24,
+                    "highlight_bias": 1.55,
+                    "shadow_bias": 1.2,
+                    "color_variance_bias": 1.4,
                 },
                 "slicer": {
                     "grid_mm": 0.12,
