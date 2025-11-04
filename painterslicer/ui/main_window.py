@@ -1667,7 +1667,12 @@ class MainWindow(QMainWindow):
             self.preview_label.setPixmap(pm)
             self.preview_label.setText("")
 
-        self.progress_slider.setValue(clamped)
+        if self.progress_slider.value() != clamped:
+            previous_block = self.progress_slider.blockSignals(True)
+            try:
+                self.progress_slider.setValue(clamped)
+            finally:
+                self.progress_slider.blockSignals(previous_block)
         self._update_progress_ui()
 
 
