@@ -288,6 +288,7 @@ class PaintingPipeline:
         palette = self._reduce_palette(calibrated, palette_size, palette_colors)
 
         dithered = self._apply_dithering(calibrated, palette, method=dither)
+        dithered = self._cleanup_black_speckles(dithered)
 
         stroke_plan = self._plan_strokes(dithered, palette, slic_segments, slic_compactness, stroke_spacing_px)
 
@@ -441,7 +442,24 @@ class PaintingPipeline:
                 palette = self._palette_via_kmeans(rgb_linear, palette_size)
 
         palette = palette.reshape(-1, 3)
+
+        value_channel = np.max(rgb, axis=2)
+        black_pixel_fraction = float(np.mean(value_channel < 0.08))
+        allow_true_black = black_pixel_fraction >= 0.02
+
         palette_lab = skcolor.rgb2lab(palette.reshape(-1, 1, 1, 3)).reshape(-1, 3)
+        if not allow_true_black:
+            min_l_star = 8.0
+            dark_mask = palette_lab[:, 0] < min_l_star
+            if np.any(dark_mask):
+                palette_lab = palette_lab.copy()
+                palette_lab[dark_mask, 0] = min_l_star
+                palette = np.clip(
+                    skcolor.lab2rgb(palette_lab.reshape(-1, 1, 1, 3)).reshape(-1, 3),
+                    0.0,
+                    1.0,
+                )
+                palette_lab = skcolor.rgb2lab(palette.reshape(-1, 1, 1, 3)).reshape(-1, 3)
 
         lab = skcolor.rgb2lab(rgb.reshape(H, W, 1, 3)).reshape(H * W, 3)
         use_ciede2000 = delta_e_cie2000 is not None and LabColor is not None and convert_color is not None
@@ -597,6 +615,7 @@ class PaintingPipeline:
             ]
 
         out = rgb.copy()
+        error_scale = 0.95
         for y in range(H):
             for x in range(W):
                 old_pixel = out[y, x]
@@ -608,9 +627,47 @@ class PaintingPipeline:
                     ny = y + dy
                     nx = x + dx
                     if 0 <= ny < H and 0 <= nx < W:
-                        out[ny, nx] += quant_error * weight
+                        out[ny, nx] = np.clip(
+                            out[ny, nx] + quant_error * weight * error_scale,
+                            0.0,
+                            1.0,
+                        )
 
         return np.clip(out, 0.0, 1.0)
+
+    def _cleanup_black_speckles(
+        self,
+        rgb: np.ndarray,
+        *,
+        value_threshold: float = 0.08,
+        min_component_size: int = 36,
+        inpaint_radius: int = 3,
+    ) -> np.ndarray:
+        srgb = np.clip(rgb, 0.0, 1.0)
+        value = np.max(srgb, axis=2)
+        candidate_mask = (value < value_threshold).astype(np.uint8)
+
+        if np.count_nonzero(candidate_mask) == 0:
+            return srgb
+
+        kernel = np.ones((3, 3), np.uint8)
+        opened = cv2.morphologyEx(candidate_mask, cv2.MORPH_OPEN, kernel)
+
+        num_labels, labels = cv2.connectedComponents(opened)
+        removal_mask = np.zeros_like(candidate_mask, dtype=np.uint8)
+
+        for label in range(1, num_labels):
+            if np.count_nonzero(labels == label) < min_component_size:
+                removal_mask[labels == label] = 255
+
+        if np.count_nonzero(removal_mask) == 0:
+            return srgb
+
+        inpaint_input = (srgb * 255).astype(np.uint8)
+        inpaint_bgr = cv2.cvtColor(inpaint_input, cv2.COLOR_RGB2BGR)
+        cleaned_bgr = cv2.inpaint(inpaint_bgr, removal_mask, inpaint_radius, cv2.INPAINT_TELEA)
+        cleaned_rgb = cv2.cvtColor(cleaned_bgr, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
+        return np.clip(cleaned_rgb, 0.0, 1.0)
 
     def _blue_noise_mask(self, shape: Tuple[int, int]) -> np.ndarray:
         rng = np.random.default_rng(12345)
