@@ -23,6 +23,7 @@ from PySide6.QtGui import QIcon, QAction, QPixmap, QImage, QPainter, QPen, QColo
 from PySide6.QtCore import Qt, QTimer
 
 import numpy as np
+from typing import Any, Dict
 from painterslicer.image_analysis.analyzer import ImageAnalyzer
 from painterslicer.slicer.slicer_core import PainterSlicer
 
@@ -38,6 +39,17 @@ class MainWindow(QMainWindow):
         # Analyzer / Slicer Objekte
         self.analyzer = ImageAnalyzer()
         self.slicer = PainterSlicer()
+
+        self.paint_styles: Dict[str, Dict[str, Any]] = self._build_style_profiles()
+        self.selected_style_key: str = "Galerie - Realismus"
+        if not self.paint_styles:
+            self.paint_styles = {
+                "Standard": {"analyzer": {}, "slicer": {}, "description": ""}
+            }
+        if self.selected_style_key not in self.paint_styles:
+            self.selected_style_key = next(iter(self.paint_styles.keys()))
+        self.active_style_profile: Dict[str, Any] = {}
+        self._apply_style_profile(self.selected_style_key)
 
         # Animation zurücksetzen
         # --- Animation / Preview State ---
@@ -361,11 +373,25 @@ class MainWindow(QMainWindow):
             return
 
         # 1. Farb- und Layer-Planung (liefert Masken + Farblayer)
+        analyzer_style: Dict[str, Any] = {}
+        slicer_style: Dict[str, Any] = {}
+        if getattr(self, "active_style_profile", None):
+            analyzer_style = dict(self.active_style_profile.get("analyzer", {}))
+            slicer_style = dict(self.active_style_profile.get("slicer", {}))
+            self.slicer.apply_style_profile(slicer_style)
+
         try:
+            planning_kwargs: Dict[str, Any] = {
+                "k_min": analyzer_style.get("k_min", 12),
+                "k_max": analyzer_style.get("k_max", 28),
+                "style_profile": analyzer_style,
+            }
+            if analyzer_style.get("k_colors") is not None:
+                planning_kwargs["k_colors"] = analyzer_style.get("k_colors")
+
             planning_result = self.analyzer.plan_painting_layers(
                 self.current_image_path,
-                k_min=12,
-                k_max=28,
+                **planning_kwargs,
             )
         except Exception as exc:
             QMessageBox.critical(
@@ -426,13 +452,15 @@ class MainWindow(QMainWindow):
         z_up = self.z_up
         z_down = self.z_down
 
+        clean_interval = slicer_style.get("clean_interval") if slicer_style else None
+
         paintcode_multi = self.slicer.multi_layer_paintcode(
             normalized_layers,
             tool_name=tool_name,
             pressure=pressure,
             z_up=z_up,
             z_down=z_down,
-            clean_interval=5
+            clean_interval=clean_interval
         )
 
         # 5. Timeline für Preview aufbauen
@@ -464,6 +492,13 @@ class MainWindow(QMainWindow):
 
         # 8. Slice-Tab Text zusammensetzen
         lines_out = []
+        if self.selected_style_key:
+            style_profile = self.paint_styles.get(self.selected_style_key, {})
+            lines_out.append(f"Aktiver Malstil: {self.selected_style_key}")
+            desc = style_profile.get("description")
+            if desc:
+                lines_out.append(desc)
+            lines_out.append("")
         lines_out.extend(plan_lines)
         lines_out.append("\n--- Farb-Layer Info ---\n")
         lines_out.append(f"Anzahl Farblayer: {len(normalized_layers)}\n")
@@ -714,6 +749,12 @@ class MainWindow(QMainWindow):
         group_params.setLayout(form_layout)
 
         # Werkzeug-Auswahl
+        self.style_combo = QComboBox()
+        self.style_combo.addItems(list(self.paint_styles.keys()))
+        self.style_combo.setCurrentText(self.selected_style_key)
+        self.style_combo.currentTextChanged.connect(self._on_style_changed)
+        form_layout.addRow("Malstil:", self.style_combo)
+
         self.tool_combo = QComboBox()
         self.tool_combo.addItems(["broad_brush", "medium_brush", "fine_brush", "sponge"])
         self.tool_combo.setCurrentText(self.selected_tool)
@@ -755,6 +796,12 @@ class MainWindow(QMainWindow):
 
         outer_layout.addWidget(group_params)
 
+        self.style_description_label = QLabel()
+        self.style_description_label.setWordWrap(True)
+        self.style_description_label.setStyleSheet("color: #ccc; font-size: 12px; padding: 4px 0;")
+        outer_layout.addWidget(self.style_description_label)
+        self._update_style_description()
+
         info_label = QLabel(
             "Diese Werte fließen in den PaintCode ein.\n"
             "Als Nächstes: COM-Port Verbindung und Farbstation/Waschlogik."
@@ -765,6 +812,137 @@ class MainWindow(QMainWindow):
         outer_layout.addStretch(1)
 
         return tab
+
+
+
+    def _build_style_profiles(self) -> Dict[str, Dict[str, Any]]:
+        """Definiert Malstil-Voreinstellungen für Analyse- und Slice-Pipeline."""
+
+        return {
+            "Studio - Schnell": {
+                "description": (
+                    "Ausgewogener Stil für schnelle Ergebnisse mit klaren Formen "
+                    "und sichtbaren Konturen."
+                ),
+                "analyzer": {
+                    "k_min": 14,
+                    "k_max": 26,
+                    "use_dither": True,
+                    "min_path_length": 2,
+                    "min_area_ratio": 0.00045,
+                    "stroke_spacing_scale": 0.9,
+                    "preserve_edge_strokes": True,
+                    "detail_edge_boost": 1.1,
+                    "edge_sensitivity": 1.0,
+                    "background_stage_gain": 0.95,
+                    "mid_stage_gain": 1.0,
+                    "detail_stage_gain": 1.1,
+                },
+                "slicer": {
+                    "grid_mm": 0.26,
+                    "num_glaze_passes": 3,
+                    "clean_interval": 5,
+                },
+            },
+            "Galerie - Realismus": {
+                "description": (
+                    "Fein abgestimmter Realismus mit erhöhter Farbvielfalt, "
+                    "weichen Übergängen und klar ausgearbeiteten Details."
+                ),
+                "analyzer": {
+                    "k_min": 20,
+                    "k_max": 36,
+                    "use_dither": True,
+                    "min_path_length": 2,
+                    "min_area_ratio": 0.00032,
+                    "stroke_spacing_scale": 0.7,
+                    "preserve_edge_strokes": True,
+                    "detail_edge_boost": 1.35,
+                    "edge_sensitivity": 1.25,
+                    "background_stage_gain": 0.9,
+                    "mid_stage_gain": 1.05,
+                    "detail_stage_gain": 1.35,
+                },
+                "slicer": {
+                    "grid_mm": 0.22,
+                    "num_glaze_passes": 4,
+                    "clean_interval": 4,
+                },
+            },
+            "Meisterwerk - Hyperreal": {
+                "description": (
+                    "Maximale Detailtiefe mit dichter Schraffur, zusätzlichen "
+                    "Kantenstrichen und intensiver Farbabstufung für nahezu "
+                    "fotorealistische Ergebnisse."
+                ),
+                "analyzer": {
+                    "k_min": 24,
+                    "k_max": 44,
+                    "use_dither": True,
+                    "min_path_length": 2,
+                    "min_area_ratio": 0.00025,
+                    "stroke_spacing_scale": 0.55,
+                    "preserve_edge_strokes": True,
+                    "detail_edge_boost": 1.6,
+                    "edge_sensitivity": 1.5,
+                    "background_stage_gain": 0.85,
+                    "mid_stage_gain": 1.1,
+                    "detail_stage_gain": 1.55,
+                },
+                "slicer": {
+                    "grid_mm": 0.18,
+                    "num_glaze_passes": 5,
+                    "clean_interval": 3,
+                },
+            },
+        }
+
+    def _apply_style_profile(self, style_key: str) -> None:
+        profile = self.paint_styles.get(style_key)
+        if not profile:
+            return
+
+        self.selected_style_key = style_key
+        self.active_style_profile = profile
+        slicer_profile = profile.get("slicer", {})
+        self.slicer.apply_style_profile(slicer_profile)
+
+    def _update_style_description(self) -> None:
+        if not hasattr(self, "style_description_label"):
+            return
+
+        profile = self.paint_styles.get(self.selected_style_key, {})
+        description = profile.get("description", "")
+        analyzer_cfg = profile.get("analyzer", {})
+
+        extras = []
+        k_max = analyzer_cfg.get("k_max")
+        if k_max:
+            extras.append(f"bis zu {int(k_max)} Farbschichten")
+        detail_boost = analyzer_cfg.get("detail_edge_boost")
+        if detail_boost:
+            extras.append(f"Detail-Boost ×{detail_boost:.2f}")
+        if analyzer_cfg.get("preserve_edge_strokes"):
+            extras.append("inkl. Kantennachzeichnung")
+
+        summary = " · ".join(extras)
+        text_parts = [description.strip()] if description else []
+        if summary:
+            text_parts.append(summary)
+
+        self.style_description_label.setText("\n".join(part for part in text_parts if part))
+
+    def _on_style_changed(self, style_key: str) -> None:
+        if not style_key or style_key not in self.paint_styles:
+            return
+
+        self._apply_style_profile(style_key)
+        self._update_style_description()
+
+        if not self.current_image_path:
+            return
+
+        self.action_slice_plan()
 
 
 
