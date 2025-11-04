@@ -16,6 +16,30 @@ except ImportError:  # pragma: no cover - Fallback erlaubt weiterhin Basisfunkti
     sitk = None
 
 
+def _fit_kmeans_compat(
+    data: np.ndarray,
+    *,
+    n_clusters: int,
+    random_state: int = 0,
+) -> KMeans:
+    """Fit ``KMeans`` with ``n_init`` compatible across scikit-learn versions."""
+
+    try:
+        model = KMeans(
+            n_clusters=n_clusters,
+            n_init="auto",
+            random_state=random_state,
+        )
+        return model.fit(data)
+    except (TypeError, ValueError):
+        model = KMeans(
+            n_clusters=n_clusters,
+            n_init=10,
+            random_state=random_state,
+        )
+        return model.fit(data)
+
+
 class ImageAnalyzer:
     """Bildanalyse / Vorverarbeitung."""
 
@@ -993,7 +1017,11 @@ class ImageAnalyzer:
         k_auto = int(np.clip(int(round(k_auto_estimate)), k_min, k_max))
         k_auto = max(1, min(k_auto, mean_lab_valid.shape[0]))
 
-        km = KMeans(n_clusters=k_auto, n_init="auto", random_state=0).fit(mean_lab_valid)
+        km = _fit_kmeans_compat(
+            mean_lab_valid,
+            n_clusters=k_auto,
+            random_state=0,
+        )
         centers_lab = km.cluster_centers_
 
         superpixel_labels = np.zeros(num_segments, dtype=np.int32)
@@ -1143,7 +1171,11 @@ def quantize_adaptive_lab(img_srgb01: np.ndarray, k_min: int = 8, k_max: int = 1
     X = lab.reshape(-1, 3)
 
     k = int(np.clip(int(np.sqrt(H * W) / 300), k_min, k_max))
-    km = KMeans(n_clusters=k, n_init="auto", random_state=0).fit(X)
+    km = _fit_kmeans_compat(
+        X,
+        n_clusters=k,
+        random_state=0,
+    )
     centers = km.cluster_centers_
     labels = km.labels_.reshape(H, W)
 
