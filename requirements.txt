@@ -6,3 +6,13 @@ PySide6
 Pillow
 scipy
 SimpleITK
+colour-science
+colormath
+OpenColorIO
+imagequant
+realesrgan
+basicsr
+facexlib
+gfpgan
+codeformer
+lpips
