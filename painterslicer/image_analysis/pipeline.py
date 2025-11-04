@@ -202,6 +202,7 @@ class PipelineResult:
     dithered_rgb: np.ndarray
     stroke_plan: List[StrokeInstruction]
     simulation_rgb: np.ndarray
+    post_processed_rgb: np.ndarray
     metrics: Dict[str, float]
     config: Dict[str, Any]
 
@@ -294,8 +295,9 @@ class PaintingPipeline:
         stroke_plan = self._plan_strokes(dithered, palette, slic_segments, slic_compactness, stroke_spacing_px)
 
         simulation = self._render_simulation(palette, dithered.shape[:2])
+        post_processed = self._post_process_render(simulation, reference_rgb=calibrated)
 
-        metrics = self._evaluate_quality(rgb01, simulation)
+        metrics = self._evaluate_quality(rgb01, post_processed)
 
         result = PipelineResult(
             processed_rgb=sr,
@@ -304,6 +306,7 @@ class PaintingPipeline:
             dithered_rgb=dithered,
             stroke_plan=stroke_plan,
             simulation_rgb=simulation,
+            post_processed_rgb=post_processed,
             metrics=metrics,
             config={
                 "enable_superres": enable_superres,
@@ -738,6 +741,76 @@ class PaintingPipeline:
 
         highlighted_rgb = cv2.cvtColor(lab, cv2.COLOR_LAB2RGB).astype(np.float32) / 255.0
         return np.clip(highlighted_rgb, 0.0, 1.0)
+
+    def _post_process_render(
+        self,
+        simulation_rgb: np.ndarray,
+        *,
+        reference_rgb: Optional[np.ndarray] = None,
+        highlight_boost: float = 0.18,
+        shadow_boost: float = 0.14,
+        saturation_boost: float = 0.1,
+    ) -> np.ndarray:
+        """High quality enhancement pass that emulates a painterly post process."""
+
+        srgb = np.clip(simulation_rgb, 0.0, 1.0).astype(np.float32)
+        if srgb.size == 0:
+            return srgb
+
+        reference = srgb if reference_rgb is None else np.clip(reference_rgb, 0.0, 1.0).astype(np.float32)
+
+        black_mask = srgb.max(axis=2) < 0.04
+        if np.any(black_mask):
+            blurred_reference = cv2.GaussianBlur((reference * 255.0).astype(np.uint8), (0, 0), 1.8)
+            blurred_reference = blurred_reference.astype(np.float32) / 255.0
+            srgb[black_mask] = blurred_reference[black_mask]
+
+        ref_gray = cv2.cvtColor((reference * 255.0).astype(np.uint8), cv2.COLOR_RGB2GRAY)
+        edges = cv2.Canny(ref_gray, 40, 140)
+        structure = cv2.GaussianBlur(edges.astype(np.float32) / 255.0, (0, 0), 1.2)
+        structure = np.clip(structure, 0.0, 1.0)
+
+        lab = cv2.cvtColor((srgb * 255.0).astype(np.uint8), cv2.COLOR_RGB2LAB).astype(np.float32)
+        L_channel = lab[..., 0] / 255.0
+
+        highlight_threshold = np.percentile(L_channel, 85.0)
+        highlight_map = np.clip((L_channel - highlight_threshold) / max(1e-4, 1.0 - highlight_threshold), 0.0, 1.0)
+        highlight_map = cv2.GaussianBlur(highlight_map.astype(np.float32), (0, 0), 1.1)
+        L_channel = np.clip(L_channel + float(np.clip(highlight_boost, 0.0, 1.0)) * highlight_map, 0.0, 1.0)
+
+        shadow_threshold = np.percentile(L_channel, 35.0)
+        shadow_map = np.clip((shadow_threshold - L_channel) / max(1e-4, shadow_threshold), 0.0, 1.0)
+        shadow_map = cv2.GaussianBlur(shadow_map.astype(np.float32), (0, 0), 1.6)
+        L_channel = np.clip(
+            L_channel - float(np.clip(shadow_boost, 0.0, 1.0)) * shadow_map * (1.0 - structure * 0.75),
+            0.0,
+            1.0,
+        )
+
+        lab[..., 0] = np.clip(L_channel * 255.0, 0.0, 255.0)
+        tonemapped = cv2.cvtColor(lab.astype(np.uint8), cv2.COLOR_LAB2RGB).astype(np.float32) / 255.0
+
+        hsv = cv2.cvtColor((tonemapped * 255.0).astype(np.uint8), cv2.COLOR_RGB2HSV).astype(np.float32)
+        saturation = hsv[..., 1] / 255.0
+        ref_hsv = cv2.cvtColor((reference * 255.0).astype(np.uint8), cv2.COLOR_RGB2HSV).astype(np.float32)
+        ref_saturation = ref_hsv[..., 1] / 255.0
+        target_saturation = np.percentile(ref_saturation, 75.0)
+        sat_gain = float(np.clip(saturation_boost, 0.0, 1.0)) * np.clip(target_saturation - saturation, 0.0, 1.0)
+        saturation = np.clip(saturation + sat_gain + structure * 0.08, 0.0, 1.0)
+        hsv[..., 1] = saturation * 255.0
+
+        value = hsv[..., 2] / 255.0
+        value = np.clip(value + highlight_map * 0.4 * float(np.clip(highlight_boost, 0.0, 1.0)), 0.0, 1.0)
+        hsv[..., 2] = value * 255.0
+
+        enhanced = cv2.cvtColor(np.clip(hsv, 0.0, 255.0).astype(np.uint8), cv2.COLOR_HSV2RGB).astype(np.float32) / 255.0
+
+        overlay = cv2.GaussianBlur(structure, (0, 0), 1.0)[..., None]
+        enhanced = np.clip(enhanced + overlay * 0.05, 0.0, 1.0)
+
+        refined = cv2.bilateralFilter((enhanced * 255.0).astype(np.uint8), d=5, sigmaColor=35, sigmaSpace=9)
+        refined = refined.astype(np.float32) / 255.0
+        return np.clip(refined, 0.0, 1.0)
 
     def _blue_noise_mask(self, shape: Tuple[int, int]) -> np.ndarray:
         rng = np.random.default_rng(12345)
