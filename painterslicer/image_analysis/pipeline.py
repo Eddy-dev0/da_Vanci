@@ -444,30 +444,40 @@ class PaintingPipeline:
         palette_lab = skcolor.rgb2lab(palette.reshape(-1, 1, 1, 3)).reshape(-1, 3)
 
         lab = skcolor.rgb2lab(rgb.reshape(H, W, 1, 3)).reshape(H * W, 3)
-        indexed = np.zeros((H * W,), dtype=np.int32)
-        delta_e = np.zeros((H * W,), dtype=np.float32)
+        use_ciede2000 = delta_e_cie2000 is not None and LabColor is not None and convert_color is not None
 
-        for i, lab_px in enumerate(lab):
-            if delta_e_cie2000 is not None and LabColor is not None and convert_color is not None:
+        if use_ciede2000:
+            palette_lab_objects = [LabColor(*lab_vals) for lab_vals in palette_lab]
+            indexed = np.zeros((H * W,), dtype=np.int32)
+            delta_e = np.zeros((H * W,), dtype=np.float32)
+
+            for i, lab_px in enumerate(lab):
                 ref = LabColor(*lab_px)
                 best_idx = 0
                 best_de = float("inf")
-                for idx, pal_lab in enumerate(palette_lab):
-                    pal = LabColor(*pal_lab)
-                    de = delta_e_cie2000(ref, pal)
+                for idx, pal_lab in enumerate(palette_lab_objects):
+                    de = delta_e_cie2000(ref, pal_lab)
                     if de < best_de:
                         best_de = de
                         best_idx = idx
                 indexed[i] = best_idx
                 delta_e[i] = best_de
-            else:
-                diff = palette_lab - lab_px
-                de = np.sqrt(np.sum(diff * diff, axis=1))
-                best_idx = int(np.argmin(de))
-                indexed[i] = best_idx
-                delta_e[i] = float(de[best_idx])
+        else:
+            diff = palette_lab[None, :, :] - lab[:, None, :]
+            dist_sq = np.sum(diff * diff, axis=2)
+            indexed = np.argmin(dist_sq, axis=1).astype(np.int32)
+            delta_e = np.sqrt(dist_sq[np.arange(dist_sq.shape[0]), indexed]).astype(np.float32)
 
         indexed_image = indexed.reshape(H, W)
+        cleaned_indexed = self._despeckle_index_map(indexed_image)
+        if not np.array_equal(cleaned_indexed, indexed_image):
+            indexed = cleaned_indexed.reshape(-1)
+            if use_ciede2000:
+                delta_e = self._compute_delta_e_map(lab, palette_lab_objects, palette_lab, indexed)
+            else:
+                delta_e = self._compute_delta_e_map(lab, None, palette_lab, indexed)
+            indexed_image = cleaned_indexed
+
         delta_e_map = delta_e.reshape(H, W)
         return PaletteResult(
             palette_rgb=np.clip(palette, 0.0, 1.0),
@@ -507,6 +517,45 @@ class PaintingPipeline:
             kmeans = KMeans(n_clusters=palette_size, n_init=10, random_state=0)
         kmeans.fit(data)
         return np.clip(kmeans.cluster_centers_, 0.0, 1.0)
+
+    def _compute_delta_e_map(
+        self,
+        lab_pixels: np.ndarray,
+        palette_lab_objects: Optional[List[LabColor]],
+        palette_lab: np.ndarray,
+        assignments: np.ndarray,
+    ) -> np.ndarray:
+        if palette_lab_objects is not None and delta_e_cie2000 is not None and LabColor is not None:
+            delta_e = np.zeros(assignments.shape[0], dtype=np.float32)
+            for i, palette_index in enumerate(assignments):
+                ref = LabColor(*lab_pixels[i])
+                delta_e[i] = float(delta_e_cie2000(ref, palette_lab_objects[int(palette_index)]))
+            return delta_e
+
+        diff = palette_lab[assignments] - lab_pixels
+        return np.sqrt(np.sum(diff * diff, axis=1)).astype(np.float32)
+
+    def _despeckle_index_map(self, index_map: np.ndarray, *, min_majority: int = 5) -> np.ndarray:
+        """Suppress isolated palette assignments that create single-pixel speckles."""
+
+        if min_majority <= 0:
+            return index_map
+
+        height, width = index_map.shape
+        padded = np.pad(index_map, 1, mode="edge")
+        cleaned = index_map.copy()
+
+        for y in range(height):
+            for x in range(width):
+                window = padded[y : y + 3, x : x + 3]
+                center = window[1, 1]
+                values, counts = np.unique(window, return_counts=True)
+                majority_idx = int(values[np.argmax(counts)])
+                majority_count = int(counts[np.argmax(counts)])
+                if majority_idx != center and majority_count >= min_majority:
+                    cleaned[y, x] = majority_idx
+
+        return cleaned
 
     def _apply_dithering(
         self,
