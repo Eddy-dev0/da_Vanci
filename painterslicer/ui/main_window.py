@@ -869,30 +869,30 @@ class MainWindow(QMainWindow):
                     "clean_interval": 4,
                 },
             },
-            "Meisterwerk - Hyperreal": {
+            "Meisterwerk - Hyperrealistisch+": {
                 "description": (
-                    "Maximale Detailtiefe mit dichter Schraffur, zusätzlichen "
-                    "Kantenstrichen und intensiver Farbabstufung für nahezu "
-                    "fotorealistische Ergebnisse."
+                    "Extrem fein abgestimmter Hyperrealismus mit maximaler "
+                    "Farb- und Detailtiefe, zusätzlicher Kantennachbearbeitung "
+                    "und noch dichterer Schichtstruktur für echte Premium-Resultate."
                 ),
                 "analyzer": {
-                    "k_min": 24,
-                    "k_max": 44,
+                    "k_min": 28,
+                    "k_max": 56,
                     "use_dither": True,
                     "min_path_length": 2,
-                    "min_area_ratio": 0.00025,
-                    "stroke_spacing_scale": 0.55,
+                    "min_area_ratio": 0.00018,
+                    "stroke_spacing_scale": 0.45,
                     "preserve_edge_strokes": True,
-                    "detail_edge_boost": 1.6,
-                    "edge_sensitivity": 1.5,
-                    "background_stage_gain": 0.85,
-                    "mid_stage_gain": 1.1,
-                    "detail_stage_gain": 1.55,
+                    "detail_edge_boost": 1.8,
+                    "edge_sensitivity": 1.7,
+                    "background_stage_gain": 0.82,
+                    "mid_stage_gain": 1.15,
+                    "detail_stage_gain": 1.7,
                 },
                 "slicer": {
-                    "grid_mm": 0.18,
-                    "num_glaze_passes": 5,
-                    "clean_interval": 3,
+                    "grid_mm": 0.15,
+                    "num_glaze_passes": 7,
+                    "clean_interval": 2,
                 },
             },
         }
