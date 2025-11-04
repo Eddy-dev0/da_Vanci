@@ -147,14 +147,39 @@ class ImageAnalyzer:
 
         processed = pil_arr
         if sitk is not None:
-            sitk_img = sitk.GetImageFromArray(processed.astype(np.float32), isVector=True)
-            sitk_img = sitk.CurvatureAnisotropicDiffusion(
-                sitk_img,
+            diffusion_kwargs = dict(
                 timeStep=0.05,
                 conductanceParameter=float(np.clip(anisotropic_conductance, 0.1, 5.0)),
                 numberOfIterations=int(np.clip(anisotropic_iterations, 1, 30)),
             )
-            processed = sitk.GetArrayFromImage(sitk_img)
+
+            try:
+                sitk_img = sitk.GetImageFromArray(
+                    processed.astype(np.float32), isVector=True
+                )
+                sitk_img = sitk.CurvatureAnisotropicDiffusion(
+                    sitk_img,
+                    **diffusion_kwargs,
+                )
+                processed = sitk.GetArrayFromImage(sitk_img)
+            except RuntimeError:
+                # Einige SimpleITK Builds (v.a. auf Windows) unterstützen die
+                # Vektorvariante nicht. In diesem Fall wenden wir die Diffusion
+                # kanalweise an und setzen das Ergebnis wieder zusammen.
+                channel_results: List[np.ndarray] = []
+                for channel in range(processed.shape[-1]):
+                    channel_img = sitk.GetImageFromArray(
+                        processed[..., channel].astype(np.float32)
+                    )
+                    channel_img = sitk.CurvatureAnisotropicDiffusion(
+                        channel_img,
+                        **diffusion_kwargs,
+                    )
+                    channel_arr = sitk.GetArrayFromImage(channel_img)
+                    channel_results.append(np.asarray(channel_arr, dtype=np.float32))
+
+                processed = np.stack(channel_results, axis=-1)
+
             processed = np.asarray(processed, dtype=np.float32)
             processed = np.clip(processed, 0.0, 1.0)
 
