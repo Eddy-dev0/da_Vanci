@@ -77,6 +77,8 @@ class MainWindow(QMainWindow):
         self.current_highlight_segment: Optional[Tuple[int, int]] = None
         self.paint_strokes_timeline = []
         self.preview_canvas_pixmap = None
+        self._current_image_size: Optional[Tuple[int, int]] = None
+        self._last_preview_display: Optional[QPixmap] = None
         self.last_planning_result = None
 
         # QTimer EINMAL erstellen und dauerhaft behalten
@@ -352,6 +354,12 @@ class MainWindow(QMainWindow):
         # Bild ins Label laden
         pixmap = QPixmap(file_path)
 
+        # Originalgröße merken, damit Preview/Exports das Ausgangsformat behalten
+        if not pixmap.isNull():
+            self._current_image_size = (pixmap.width(), pixmap.height())
+        else:
+            self._current_image_size = None
+
         if pixmap.isNull():
             # Falls das Bild nicht geladen werden kann
             self.image_label.setText("Fehler beim Laden des Bildes.")
@@ -596,8 +604,7 @@ class MainWindow(QMainWindow):
         pm0 = self._render_full_state_at(-1)  # liefert schwarze Fläche
         if pm0 is not None:
             self.preview_canvas_pixmap = pm0
-            self.preview_label.setPixmap(pm0)
-            self.preview_label.setText("")
+            self._display_preview_pixmap(pm0)
         self._update_progress_ui()
 
 
@@ -766,6 +773,9 @@ class MainWindow(QMainWindow):
             Qt.SmoothTransformation
         )
         self.image_label.setPixmap(scaled)
+
+        if self._last_preview_display is not None:
+            self._display_preview_pixmap(self._last_preview_display)
 
     def _build_machine_tab(self):
         """
@@ -1266,6 +1276,49 @@ class MainWindow(QMainWindow):
 
 
 
+    def _get_preview_canvas_dimensions(self) -> Tuple[int, int]:
+        """Return the target canvas size for previews in original image dimensions."""
+
+        fallback = (800, 800)
+
+        if self._current_image_size:
+            width, height = self._current_image_size
+            if width > 0 and height > 0:
+                return width, height
+
+        if self.current_image_path:
+            pixmap = QPixmap(self.current_image_path)
+            if not pixmap.isNull():
+                self._current_image_size = (pixmap.width(), pixmap.height())
+                return self._current_image_size
+
+        return fallback
+
+    def _display_preview_pixmap(self, pixmap: Optional[QPixmap]) -> None:
+        """Show ``pixmap`` in the preview label while keeping aspect ratio."""
+
+        if pixmap is None or pixmap.isNull():
+            self.preview_label.setPixmap(QPixmap())
+            self._last_preview_display = None
+            return
+
+        self._last_preview_display = QPixmap(pixmap)
+
+        target_size = self.preview_label.size()
+        if target_size.width() > 0 and target_size.height() > 0:
+            scaled = pixmap.scaled(
+                target_size,
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+            self.preview_label.setPixmap(scaled)
+        else:
+            self.preview_label.setPixmap(pixmap)
+
+        self.preview_label.setText("")
+
+
+
 
     def render_preview_full_colored(self):
         """
@@ -1279,12 +1332,11 @@ class MainWindow(QMainWindow):
         self.stop_preview_animation()
 
         if not self.paint_strokes_timeline or len(self.paint_strokes_timeline) == 0:
+            self._display_preview_pixmap(None)
             self.preview_label.setText("Keine Pfade vorhanden.\nBitte 'Slice planen'.")
-            self.preview_label.setPixmap(QPixmap())
             return
 
-        canvas_w = 800
-        canvas_h = 800
+        canvas_w, canvas_h = self._get_preview_canvas_dimensions()
 
         work_w = float(self.slicer.work_w_mm)
         work_h = float(self.slicer.work_h_mm)
@@ -1320,8 +1372,7 @@ class MainWindow(QMainWindow):
 
         self.preview_canvas_pixmap = pm
         self.current_highlight_segment = None
-        self.preview_label.setPixmap(pm)
-        self.preview_label.setText("")
+        self._display_preview_pixmap(pm)
 
 
 
@@ -1340,12 +1391,11 @@ class MainWindow(QMainWindow):
         from PySide6.QtCore import Qt
 
         if not self.last_mm_paths or len(self.last_mm_paths) == 0:
+            self._display_preview_pixmap(None)
             self.preview_label.setText("Keine Pfade vorhanden.\nBitte 'Slice planen'.")
-            self.preview_label.setPixmap(QPixmap())
             return
 
-        canvas_w = 800
-        canvas_h = 800
+        canvas_w, canvas_h = self._get_preview_canvas_dimensions()
 
         work_w = float(self.slicer.work_w_mm)
         work_h = float(self.slicer.work_h_mm)
@@ -1403,8 +1453,7 @@ class MainWindow(QMainWindow):
 
         painter.end()
 
-        self.preview_label.setPixmap(pm)
-        self.preview_label.setText("")
+        self._display_preview_pixmap(pm)
 
     def start_preview_animation(self):
         strokes = self.paint_strokes_timeline
@@ -1505,8 +1554,7 @@ class MainWindow(QMainWindow):
         self._finalize_current_highlight_to_canvas()
 
         if self.preview_canvas_pixmap is not None:
-            self.preview_label.setPixmap(QPixmap(self.preview_canvas_pixmap))
-            self.preview_label.setText("")
+            self._display_preview_pixmap(QPixmap(self.preview_canvas_pixmap))
 
         self._update_progress_ui()
 
@@ -1552,7 +1600,8 @@ class MainWindow(QMainWindow):
         if pm is None:
             # fallback leere schwarze Fläche
             from PySide6.QtGui import QPixmap, QColor
-            pm = QPixmap(800, 800)
+            canvas_w, canvas_h = self._get_preview_canvas_dimensions()
+            pm = QPixmap(canvas_w, canvas_h)
             pm.fill(QColor(0,0,0))
         self.preview_canvas_pixmap = pm
 
@@ -1570,7 +1619,7 @@ class MainWindow(QMainWindow):
 
         strokes = self.paint_strokes_timeline
         if not strokes:
-            self.preview_label.setPixmap(QPixmap())
+            self._display_preview_pixmap(None)
             self.preview_label.setText("Keine Pfade vorhanden.\nBitte 'Slice planen'.")
             return
 
@@ -1578,7 +1627,7 @@ class MainWindow(QMainWindow):
             self._reset_preview_canvas_for_animation()
 
         if self.preview_canvas_pixmap is None:
-            self.preview_label.setPixmap(QPixmap())
+            self._display_preview_pixmap(None)
             self.preview_label.setText("Keine Pfade vorhanden.\nBitte 'Slice planen'.")
             return
 
@@ -1615,8 +1664,7 @@ class MainWindow(QMainWindow):
                     painter.drawLine(x1_px, y1_px, x2_px, y2_px)
                     painter.end()
 
-        self.preview_label.setPixmap(frame_pm)
-        self.preview_label.setText("")
+        self._display_preview_pixmap(frame_pm)
 
 
 
@@ -1636,8 +1684,7 @@ class MainWindow(QMainWindow):
         if not strokes:
             return None
 
-        canvas_w = 800
-        canvas_h = 800
+        canvas_w, canvas_h = self._get_preview_canvas_dimensions()
         work_w = float(self.slicer.work_w_mm)
         work_h = float(self.slicer.work_h_mm)
 
@@ -1701,8 +1748,7 @@ class MainWindow(QMainWindow):
         if pm:
             self.preview_canvas_pixmap = pm
             self.current_highlight_segment = None
-            self.preview_label.setPixmap(pm)
-            self.preview_label.setText("")
+            self._display_preview_pixmap(pm)
 
         if self.progress_slider.value() != clamped:
             previous_block = self.progress_slider.blockSignals(True)
@@ -1727,8 +1773,7 @@ class MainWindow(QMainWindow):
         from PySide6.QtGui import QPixmap, QPainter, QPen, QColor
         strokes = getattr(self, "paint_strokes_timeline", [])
 
-        canvas_w = 800
-        canvas_h = 800
+        canvas_w, canvas_h = self._get_preview_canvas_dimensions()
         work_w = float(self.slicer.work_w_mm)
         work_h = float(self.slicer.work_h_mm)
 
@@ -1851,10 +1896,9 @@ class MainWindow(QMainWindow):
             final_pm = self._render_full_state_at(len(self.paint_strokes_timeline) - 1)
 
         if final_pm is not None:
-            self.preview_label.setPixmap(final_pm)
-            self.preview_label.setText("")
+            self._display_preview_pixmap(final_pm)
         else:
-            self.preview_label.setPixmap(QPixmap())
+            self._display_preview_pixmap(None)
             self.preview_label.setText("Keine Pfade vorhanden.\nBitte 'Slice planen'.")
 
         self.current_highlight_segment = None
