@@ -13,6 +13,26 @@ Konturen für den Malplaner.
 Alle benötigten Python-Abhängigkeiten, inklusive der neuen Bibliotheken (SciPy,
 SimpleITK, Pillow), finden sich in `requirements.txt`.
 
+### Layer-orientierte API
+
+Für Workflows, die einzelne Ebenen separat weiterverarbeiten möchten, stehen nun
+folgende High-Level-Helfer bereit:
+
+* `painterslicer.image_analysis.segment_image_into_layers(image_source)` liefert
+  neben den Masken für Hintergrund, Mittelgrund und Details auch direkt die
+  RGB-Layer (Float 0‒1), bei denen Off-Mask-Bereiche transparent gesetzt sind.
+* `painterslicer.image_analysis.enhance_layer(layer_rgb01, mask, scale, model_path=None)`
+  nutzt intern Real-ESRGAN (falls verfügbar), um einen einzelnen Layer
+  hochzuskalieren und wendet anschließend wieder die Maske an, sodass keine
+  Ausfransungen außerhalb der Maske entstehen.
+* `painterslicer.image_analysis.compose_layers(background, midground, foreground, feather_radius=3)`
+  setzt drei RGBA-Layer in der Reihenfolge Hintergrund → Mittelgrund → Vordergrund
+  per Alpha-Blending zusammen und erlaubt optionales Feathering der Masken über
+  einen Gauß-Blur.
+
+Alle Funktionen arbeiten rein auf NumPy-Arrays und lassen sich somit auch in Tests
+oder externen Tools unkompliziert einsetzen.
+
 ## Übernahme von Änderungen aus einem externen Branch
 
 Falls du die hier bereitgestellten Commits in dein lokales Projekt übernehmen möchtest, führe die folgenden Schritte im Stammverzeichnis deines PainterSlicer-Git-Repositories aus (dort, wo sich der Ordner `.git` befindet). Wenn du dich nicht im richtigen Verzeichnis befindest, meldet Git wie in deinem Screenshot, dass es sich „nicht um ein Git-Repository“ handelt.

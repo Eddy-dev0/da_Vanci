@@ -464,6 +464,69 @@ class ImageAnalyzer:
             "detail_mask": masks.get("detail"),
         }
 
+
+def _normalise_mask(mask: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    """Convert ``mask`` to a float32 array in the range 0..1."""
+
+    if mask is None:
+        return None
+
+    mask_arr = np.asarray(mask)
+    if mask_arr.ndim == 3:
+        # Collapse possible colour dimension that might have slipped through
+        mask_arr = mask_arr[..., 0]
+
+    mask_arr = mask_arr.astype(np.float32)
+    mask_arr = np.clip(mask_arr, 0.0, None)
+
+    max_val = float(mask_arr.max()) if mask_arr.size else 0.0
+    if max_val > 0:
+        if max_val > 1.0:
+            mask_arr /= max_val
+    return mask_arr
+
+
+def segment_image_into_layers(
+    image_source: Union[str, np.ndarray]
+) -> Dict[str, Dict[str, Optional[np.ndarray]]]:
+    """Segment ``image_source`` into background/mid/detail RGB layers.
+
+    The helper instantiates :class:`ImageAnalyzer`, re-uses its
+    :meth:`make_layer_masks` pipeline and multiplies the resulting masks with the
+    original RGB data (converted to float32 0..1).  The return value bundles the
+    masks as well as the RGB layers to offer a compact, ready-to-use API for
+    downstream processing.
+    """
+
+    analyzer = ImageAnalyzer()
+    masks = analyzer.make_layer_masks(image_source)
+
+    if analyzer.last_enhanced_rgb01 is not None:
+        rgb01 = analyzer.last_enhanced_rgb01.copy()
+    else:
+        rgb01 = analyzer._ensure_rgb01(image_source)
+
+    layer_images: Dict[str, Optional[np.ndarray]] = {}
+    for stage, mask_key in (
+        ("background", "background_mask"),
+        ("mid", "mid_mask"),
+        ("detail", "detail_mask"),
+    ):
+        mask = _normalise_mask(masks.get(mask_key))
+        if mask is None:
+            layer_images[stage] = None
+            continue
+
+        if mask.shape[:2] != rgb01.shape[:2]:
+            mask = cv2.resize(mask, (rgb01.shape[1], rgb01.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+        layer_images[stage] = (rgb01 * mask[..., None]).astype(np.float32)
+
+    return {
+        "masks": masks,
+        "layers": layer_images,
+    }
+
     def plan_painting_layers(
         self,
         image_source: Union[str, np.ndarray],

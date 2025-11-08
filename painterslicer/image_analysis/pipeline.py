@@ -100,7 +100,7 @@ try:
 except Exception:  # pragma: no cover - optional dependency
     torch = None
 
-from .analyzer import ImageAnalyzer
+from .analyzer import ImageAnalyzer, _normalise_mask
 
 
 LOGGER = logging.getLogger(__name__)
@@ -253,6 +253,42 @@ def _encode_srgb(rgb_linear: np.ndarray) -> np.ndarray:
         rgb_linear * 12.92,
         (1 + a) * np.power(rgb_linear, 1 / 2.4) - a,
     )
+
+
+def enhance_layer(
+    layer_rgb01: np.ndarray,
+    mask: np.ndarray,
+    *,
+    scale: int,
+    model_path: Optional[str] = None,
+) -> Tuple[np.ndarray, bool]:
+    """Enhance a single RGB layer via the pipeline's super-resolution stack."""
+
+    rgb = np.clip(np.asarray(layer_rgb01, dtype=np.float32), 0.0, 1.0)
+    mask_norm = _normalise_mask(mask)
+
+    if mask_norm is None:
+        raise ValueError("mask must not be None")
+
+    pipeline = PaintingPipeline()
+    rgb_linear = _linearise_srgb(rgb)
+    enhanced_linear, applied = pipeline._run_super_resolution(
+        rgb_linear, scale=scale, model_path=model_path
+    )
+
+    enhanced_rgb = _encode_srgb(np.clip(enhanced_linear, 0.0, 1.0)).astype(np.float32)
+
+    if mask_norm.shape[:2] != enhanced_rgb.shape[:2]:
+        mask_resized = cv2.resize(
+            mask_norm,
+            (enhanced_rgb.shape[1], enhanced_rgb.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(np.float32)
+    else:
+        mask_resized = mask_norm.astype(np.float32)
+
+    masked = enhanced_rgb * mask_resized[..., None]
+    return masked, applied
 
 
 def _lab_to_srgb_safe(lab: np.ndarray) -> np.ndarray:
