@@ -26,9 +26,11 @@ approach so that the rest of the pipeline still works.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -46,6 +48,31 @@ try:  # perceptual similarity
     import lpips
 except Exception:  # pragma: no cover - optional dependency
     lpips = None
+
+if lpips is not None:  # pragma: no cover - optional dependency
+    try:
+        import torchvision.models as _tv_models
+        from torchvision.models import AlexNet_Weights as _TorchvisionAlexNetWeights
+    except Exception:  # pragma: no cover - optional dependency
+        _tv_models = None
+        _TorchvisionAlexNetWeights = None
+    else:
+        _orig_alexnet = _tv_models.alexnet
+
+        if not getattr(_orig_alexnet, "_lpips_weights_patch", False):
+
+            def _alexnet_with_weights(*args, **kwargs):
+                pretrained = kwargs.pop("pretrained", None)
+                weights = kwargs.pop("weights", None)
+                if weights is None and pretrained is not None:
+                    if pretrained and _TorchvisionAlexNetWeights is not None:
+                        weights = _TorchvisionAlexNetWeights.IMAGENET1K_V1
+                    else:
+                        weights = None
+                return _orig_alexnet(*args, weights=weights, **kwargs)
+
+            _alexnet_with_weights._lpips_weights_patch = True  # type: ignore[attr-defined]
+            _tv_models.alexnet = _alexnet_with_weights
 
 try:
     from colormath.color_objects import LabColor
@@ -226,6 +253,48 @@ def _encode_srgb(rgb_linear: np.ndarray) -> np.ndarray:
         rgb_linear * 12.92,
         (1 + a) * np.power(rgb_linear, 1 / 2.4) - a,
     )
+
+
+def _lab_to_srgb_safe(lab: np.ndarray) -> np.ndarray:
+    lab_arr = np.asarray(lab, dtype=np.float32)
+    xyz = skcolor.lab2xyz(lab_arr)
+    xyz[..., 2] = np.clip(xyz[..., 2], 0.0, None)
+    return skcolor.xyz2rgb(xyz, clip=True)
+
+
+def _initialise_lpips_model() -> Optional[Any]:  # pragma: no cover - optional dependency
+    if lpips is None or torch is None:
+        return None
+
+    try:
+        model = lpips.LPIPS(net="alex", pretrained=False, verbose=True)
+    except Exception as exc:  # pragma: no cover - depends on optional dep
+        LOGGER.warning("Failed to initialise LPIPS model: %s", exc)
+        return None
+
+    try:
+        weights_root = Path(inspect.getfile(lpips.LPIPS)).resolve().parent / "weights"
+        weights_path = weights_root / f"v{model.version}" / f"{model.pnet_type}.pth"
+    except Exception as exc:  # pragma: no cover - depends on optional dep
+        LOGGER.warning("Failed to resolve LPIPS weights location: %s", exc)
+        return None
+
+    if not weights_path.exists():  # pragma: no cover - depends on optional dep
+        LOGGER.warning("LPIPS weights not found at %s", weights_path)
+        return None
+
+    try:
+        try:
+            state_dict = torch.load(str(weights_path), map_location="cpu", weights_only=True)
+        except TypeError:  # pragma: no cover - torch < 2.1
+            state_dict = torch.load(str(weights_path), map_location="cpu")
+        model.load_state_dict(state_dict, strict=False)
+    except Exception as exc:  # pragma: no cover - depends on optional dep
+        LOGGER.warning("Failed to load LPIPS weights: %s", exc)
+        return None
+
+    model.eval()
+    return model
 
 
 class PaintingPipeline:
@@ -468,7 +537,7 @@ class PaintingPipeline:
         enhanced_L = np.clip(L_clahe + sharpen_amount * (L_clahe - sharpen), 0.0, 1.0)
         lab[..., 0] = enhanced_L * 100.0
 
-        rgb_out = skcolor.lab2rgb(lab)
+        rgb_out = _lab_to_srgb_safe(lab)
         return _linearise_srgb(np.clip(rgb_out, 0.0, 1.0))
 
     def _apply_calibration(
@@ -525,7 +594,7 @@ class PaintingPipeline:
                 palette_lab = palette_lab.copy()
                 palette_lab[dark_mask, 0] = min_l_star
                 palette = np.clip(
-                    skcolor.lab2rgb(palette_lab.reshape(-1, 1, 1, 3)).reshape(-1, 3),
+                    _lab_to_srgb_safe(palette_lab.reshape(-1, 1, 1, 3)).reshape(-1, 3),
                     0.0,
                     1.0,
                 )
@@ -986,16 +1055,16 @@ class PaintingPipeline:
             ssim_val = skmetrics.structural_similarity(ref, sim, multichannel=True, data_range=1.0)
         metrics: Dict[str, float] = {"ssim": float(ssim_val)}
 
+        lpips_val = float("nan")
         if lpips is not None and torch is not None:
             if self._lpips_model is None:
-                self._lpips_model = lpips.LPIPS(net="alex")
-            ref_tensor = torch.from_numpy(ref.transpose(2, 0, 1)).unsqueeze(0).float() * 2 - 1
-            sim_tensor = torch.from_numpy(sim.transpose(2, 0, 1)).unsqueeze(0).float() * 2 - 1
-            with torch.no_grad():  # pragma: no cover - requires torch
-                lpips_val = float(self._lpips_model(ref_tensor, sim_tensor).item())
-            metrics["lpips"] = lpips_val
-        else:
-            metrics["lpips"] = float("nan")
+                self._lpips_model = _initialise_lpips_model()
+            if self._lpips_model is not None:
+                ref_tensor = torch.from_numpy(ref.transpose(2, 0, 1)).unsqueeze(0).float() * 2 - 1
+                sim_tensor = torch.from_numpy(sim.transpose(2, 0, 1)).unsqueeze(0).float() * 2 - 1
+                with torch.no_grad():  # pragma: no cover - requires torch
+                    lpips_val = float(self._lpips_model(ref_tensor, sim_tensor).item())
+        metrics["lpips"] = lpips_val
 
         return metrics
 
