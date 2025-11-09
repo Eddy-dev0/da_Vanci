@@ -16,3 +16,6 @@ facexlib
 gfpgan
 codeformer
 lpips
+torch
+torchvision
+tqdm
