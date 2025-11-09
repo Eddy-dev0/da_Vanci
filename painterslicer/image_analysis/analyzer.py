@@ -1,5 +1,6 @@
 import hashlib
 import os
+from types import MethodType
 from typing import Dict, Any, Optional, List, Union, Tuple
 
 import numpy as np
@@ -643,17 +644,26 @@ class ImageAnalyzer:
 
         extractor = getattr(self, "extract_color_layers", None)
         if not callable(extractor):
-            extractor = getattr(self, "_extract_color_layers_impl", None)
-            if not callable(extractor):
+            impl = getattr(self, "_extract_color_layers_impl", None)
+            if callable(impl):
+                extractor = impl
+            else:
                 class_impl = getattr(type(self), "_extract_color_layers_impl", None)
                 if class_impl is not None and hasattr(class_impl, "__get__"):
                     extractor = class_impl.__get__(self, type(self))
                 else:
                     extractor = class_impl
-            if not callable(extractor):
-                raise AttributeError(
-                    "ImageAnalyzer is missing a color layer extractor implementation"
-                )
+
+                if not callable(extractor):
+                    extractor = MethodType(_fallback_extract_color_layers, self)
+
+            if callable(extractor):
+                self.extract_color_layers = extractor
+
+        if not callable(extractor):
+            raise AttributeError(
+                "ImageAnalyzer is missing a color layer extractor implementation"
+            )
 
         color_layers = extractor(
             image_source,
@@ -917,6 +927,65 @@ class ImageAnalyzer:
             },
             "layers": planned_layers,
         }
+
+
+def _fallback_extract_color_layers(
+    self: "ImageAnalyzer",
+    image_source: Union[str, np.ndarray],
+    *,
+    k_colors: Optional[int] = None,
+    k_min: int = 8,
+    k_max: int = 16,
+    **_: Any,
+) -> List[Dict[str, Any]]:
+    """Minimal colour layer extractor used when the main implementation is missing."""
+
+    img_rgb01 = self._ensure_rgb01(image_source)
+
+    if k_colors is not None:
+        target_k = max(1, int(k_colors))
+        k_min = target_k
+        k_max = target_k
+
+    lab_quant, centers_lab, labels = quantize_adaptive_lab(
+        img_rgb01,
+        k_min=k_min,
+        k_max=k_max,
+    )
+
+    palette_rgb01 = lab2rgb(centers_lab.reshape(1, -1, 3)).reshape(-1, 3).clip(0.0, 1.0)
+    quant_rgb01 = lab2rgb(lab_quant).clip(0.0, 1.0)
+
+    self.last_color_analysis = {
+        "preprocessed_rgb01": img_rgb01.astype(np.float32),
+        "labels": labels.astype(np.int32),
+        "centers_lab": centers_lab.astype(np.float32),
+        "palette_rgb01": palette_rgb01.astype(np.float32),
+        "quant_rgb01": quant_rgb01.astype(np.float32),
+        "shading_annotations": {},
+    }
+
+    layers: List[Dict[str, Any]] = []
+    total_pixels = float(labels.size) if labels.size else 1.0
+
+    for label in np.unique(labels):
+        mask = labels == label
+        coverage = float(np.count_nonzero(mask) / total_pixels)
+        color_rgb = tuple(
+            int(np.clip(round(c * 255.0), 0, 255)) for c in palette_rgb01[int(label)]
+        )
+        layers.append(
+            {
+                "label": int(label),
+                "color_rgb": color_rgb,
+                "pixel_paths": [],
+                "coverage": float(coverage),
+            }
+        )
+
+    layers.sort(key=lambda entry: entry["label"])
+
+    return layers
 
 
 def _normalise_mask(mask: Optional[np.ndarray]) -> Optional[np.ndarray]:
