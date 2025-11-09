@@ -645,6 +645,12 @@ class ImageAnalyzer:
         if not callable(extractor):
             extractor = getattr(self, "_extract_color_layers_impl", None)
             if not callable(extractor):
+                class_impl = getattr(type(self), "_extract_color_layers_impl", None)
+                if class_impl is not None and hasattr(class_impl, "__get__"):
+                    extractor = class_impl.__get__(self, type(self))
+                else:
+                    extractor = class_impl
+            if not callable(extractor):
                 raise AttributeError(
                     "ImageAnalyzer is missing a color layer extractor implementation"
                 )
