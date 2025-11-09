@@ -1141,7 +1141,12 @@ def segment_image_into_layers(
             img_arr /= 255.0
         return img_arr.clip(0, 1)
 
-    def extract_color_layers(
+    def extract_color_layers(self, *args, **kwargs):
+        """Compatibility wrapper that forwards to ``_extract_color_layers_impl``."""
+
+        return self._extract_color_layers_impl(*args, **kwargs)
+
+    def _extract_color_layers_impl(
         self,
         image_source: Union[str, np.ndarray],
         *,
