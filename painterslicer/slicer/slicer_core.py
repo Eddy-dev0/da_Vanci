@@ -221,29 +221,51 @@ class PainterSlicer:
 
     def normalize_color_layers_to_mm(self, image_path: str, color_layers: list):
         """
-        Nimmt die color_layers vom Analyzer (jede hat pixel_paths + color_rgb)
-        und rechnet alle pixel_paths in mm um.
+        Nimmt die ``color_layers`` vom Analyzer (jede hat ``pixel_paths`` + reichhaltige
+        Metadaten) und rechnet alle ``pixel_paths`` in mm um. Zusätzlich werden die
+        Analyseattribute (Stage, Werkzeugempfehlung, Kennzahlen …) konserviert, damit der
+        Slice-Prozess diese Informationen vollständig ausnutzen kann.
 
         Rückgabe:
         [
             {
-                "color_rgb": (r,g,b),
-                "mm_paths": [ [(x_mm,y_mm), (x_mm,y_mm), ...], [...], ... ]
+                "color_rgb": (r, g, b),
+                "mm_paths": [ [(x_mm, y_mm), ...], ... ],
+                "stage": "background" | "mid" | "detail",
+                "tool": str,
+                "technique": str,
+                "coverage": float,
+                "detail_strength": float,
+                "highlight_strength": float,
+                ...
             },
             ...
         ]
         """
+
         img = cv2.imread(image_path)
         if img is None:
             return []
 
         img_h, img_w = img.shape[:2]
 
+        # Reihenfolge beibehalten: zuerst nach explizitem Order, ansonsten nach Stage
+        stage_priority = {"background": 0, "mid": 1, "detail": 2}
+
+        indexed_layers = list(enumerate(color_layers))
+        indexed_layers.sort(
+            key=lambda entry: (
+                entry[1].get("order", 1_000_000 + entry[0]),
+                stage_priority.get(entry[1].get("stage"), 1),
+                -float(entry[1].get("coverage", 0.0)),
+            )
+        )
+
         norm_layers = []
 
-        for layer in color_layers:
-            pixel_paths = layer["pixel_paths"]
-            rgb = layer["color_rgb"]
+        for idx, layer in indexed_layers:
+            pixel_paths = layer.get("pixel_paths", []) or []
+            rgb = tuple(layer.get("color_rgb", (0, 0, 0)))
 
             mm_paths = []
             for path in pixel_paths:
@@ -255,12 +277,169 @@ class PainterSlicer:
                 if len(mm_path) > 1:
                     mm_paths.append(mm_path)
 
-            norm_layers.append({
+            # Helligkeitsheuristik für Fallback-Sortierungen in späteren Schritten
+            luminance = (
+                0.2126 * rgb[0] + 0.7152 * rgb[1] + 0.0722 * rgb[2]
+                if rgb
+                else 0.0
+            )
+
+            enriched = {
                 "color_rgb": rgb,
-                "mm_paths": mm_paths
-            })
+                "mm_paths": mm_paths,
+                "order": layer.get("order", idx),
+                "stage": layer.get("stage"),
+                "tool": layer.get("tool"),
+                "technique": layer.get("technique"),
+                "coverage": float(layer.get("coverage", 0.0)),
+                "detail_ratio": float(layer.get("detail_ratio", 0.0)),
+                "mid_ratio": float(layer.get("mid_ratio", 0.0)),
+                "background_ratio": float(layer.get("background_ratio", 0.0)),
+                "detail_strength": float(layer.get("detail_strength", 0.0)),
+                "mid_strength": float(layer.get("mid_strength", 0.0)),
+                "background_strength": float(layer.get("background_strength", 0.0)),
+                "texture_strength": float(layer.get("texture_strength", 0.0)),
+                "highlight_strength": float(layer.get("highlight_strength", 0.0)),
+                "shadow_strength": float(layer.get("shadow_strength", 0.0)),
+                "contrast_strength": float(layer.get("contrast_strength", 0.0)),
+                "color_variance_strength": float(layer.get("color_variance_strength", 0.0)),
+                "path_count": int(layer.get("path_count", len(mm_paths))),
+                "path_length": int(layer.get("path_length", 0)),
+                "shading": layer.get("shading"),
+                "label": layer.get("label"),
+                "_approx_luminance": float(luminance),
+            }
+
+            norm_layers.append(enriched)
 
         return norm_layers
+
+    def derive_layer_execution(
+        self,
+        layer: Dict[str, Any],
+        *,
+        default_tool: str,
+        default_pressure: float,
+        z_down: float,
+        z_up: Optional[float] = None,
+        clean_interval: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Leitet ausführbare Parameter für eine Farbschicht ab.
+
+        Die Analyse liefert umfangreiche Kennwerte (Stage, Technik, Stärken/Schwächen).
+        Diese Funktion übersetzt sie in konkrete Maschinenparameter: Werkzeugwahl,
+        Druck, Z-Höhen, Anzahl der Glaze-Pässe und Reinigungsintervalle.
+        """
+
+        stage = layer.get("stage") or "mid"
+        technique = layer.get("technique") or ""
+        shading = layer.get("shading") or ""
+        coverage = float(layer.get("coverage", 0.0))
+        detail_strength = float(layer.get("detail_strength", 0.0))
+        highlight_strength = float(layer.get("highlight_strength", 0.0))
+        shadow_strength = float(layer.get("shadow_strength", 0.0))
+        texture_strength = float(layer.get("texture_strength", 0.0))
+        contrast_strength = float(layer.get("contrast_strength", 0.0))
+
+        stage_to_tool = layer.get("tool")
+        tool = stage_to_tool if isinstance(stage_to_tool, str) else default_tool
+
+        brush_meta = self.brush_presets.get(tool, {})
+        preset_pressure = brush_meta.get("default_pressure")
+        if preset_pressure is None:
+            preset_pressure = self._get_brush_pressure(tool)
+        base_pressure = float(default_pressure)
+        if preset_pressure is not None:
+            try:
+                base_pressure = 0.6 * base_pressure + 0.4 * float(preset_pressure)
+            except (TypeError, ValueError):
+                pass
+
+        pressure = base_pressure
+        if stage == "background":
+            pressure *= 1.0 + 0.25 * np.clip(coverage - 0.25, -0.25, 0.5)
+            pressure *= 1.0 + 0.1 * np.clip(shadow_strength - 0.4, 0.0, 0.6)
+        elif stage == "detail":
+            pressure *= 0.75
+            pressure *= 1.0 - 0.2 * np.clip(detail_strength - 0.3, 0.0, 0.7)
+        else:  # mid
+            pressure *= 1.0 + 0.1 * np.clip(texture_strength - 0.4, 0.0, 0.6)
+
+        if technique in {"luminous_glazing", "shadow_glaze"}:
+            pressure *= 0.85
+        if technique in {"precision_strokes", "cross_hatching"}:
+            pressure *= 0.9
+        if shading == "highlight":
+            pressure *= 0.9
+        elif shading == "shadow":
+            pressure *= 1.05
+
+        pressure = float(np.clip(pressure, 0.1, 1.0))
+
+        layer_z_down = float(z_down)
+        if stage == "background":
+            layer_z_down += 0.25 * np.clip(coverage, 0.0, 0.6)
+        elif stage == "detail":
+            layer_z_down -= 0.4
+
+        if technique == "luminous_glazing":
+            layer_z_down -= 0.2
+        elif technique == "shadow_glaze":
+            layer_z_down += 0.2
+        elif technique == "vibrant_impasto":
+            layer_z_down += 0.15
+
+        layer_z_down = max(0.1, layer_z_down)
+        z_up_base = float(self.z_up_default if z_up is None else z_up)
+        layer_z_up = float(z_up_base)
+        if stage == "detail":
+            layer_z_up = max(z_up_base, layer_z_down + 2.0)
+
+        base_passes = max(1, int(self.num_glaze_passes))
+        if technique in {"precision_strokes", "cross_hatching"}:
+            passes = 1
+        elif technique in {"luminous_glazing", "shadow_glaze"}:
+            passes = max(base_passes, 3 if highlight_strength > 0.5 else 2)
+        elif stage == "detail":
+            passes = max(1, min(base_passes, 2))
+        else:
+            passes = base_passes
+
+        base_clean = (
+            int(clean_interval)
+            if clean_interval is not None
+            else int(self.clean_interval_default)
+        )
+        base_clean = max(1, base_clean)
+
+        clean_interval_layer = base_clean
+        if tool == "fine_brush" or stage == "detail":
+            clean_interval_layer = min(clean_interval_layer, 2)
+        elif coverage > 0.4:
+            clean_interval_layer = max(clean_interval_layer, 6)
+        elif technique == "vibrant_impasto":
+            clean_interval_layer = max(clean_interval_layer, 5)
+
+        needs_cleaning = bool(brush_meta.get("needs_cleaning", True))
+
+        return {
+            "tool": tool,
+            "pressure": pressure,
+            "z_down": layer_z_down,
+            "z_up": layer_z_up,
+            "passes": passes,
+            "clean_interval": clean_interval_layer,
+            "needs_cleaning": needs_cleaning,
+            "technique": technique,
+            "stage": stage,
+            "shading": shading,
+            "coverage": coverage,
+            "detail_strength": detail_strength,
+            "highlight_strength": highlight_strength,
+            "shadow_strength": shadow_strength,
+            "texture_strength": texture_strength,
+            "contrast_strength": contrast_strength,
+        }
 
 
 
@@ -290,10 +469,6 @@ class PainterSlicer:
         lines = []
         stroke_global_id = 1
 
-        # hole Stationsdaten
-        brush_meta = self.brush_presets.get(tool_name, {})
-        needs_cleaning = bool(brush_meta.get("needs_cleaning", True))
-
         if clean_interval is None:
             clean_interval = int(self.clean_interval_default)
 
@@ -308,100 +483,128 @@ class PainterSlicer:
         wash_y = float(wash.get("y", 0.0))
         wash_z = float(wash.get("z", z_up))
 
-        # --- Farbreihenfolge anpassen (hell -> dunkel) ---
-        def luminance(rgb):
-            r, g, b = rgb
-            return 0.2126*r + 0.7152*g + 0.0722*b
-
+        stage_priority = {"background": 0, "mid": 1, "detail": 2}
         normalized_layers = sorted(
             normalized_layers,
-            key=lambda L: luminance(L["color_rgb"]),
-            reverse=False  # False = hell zuerst
+            key=lambda L: (
+                L.get("order", 1_000_000),
+                stage_priority.get(L.get("stage"), 1),
+                L.get("_approx_luminance", 0.0),
+            ),
         )
 
-
         for layer_idx, layer in enumerate(normalized_layers):
-            color_rgb = layer["color_rgb"]
-            mm_paths = layer["mm_paths"]
+            color_rgb = layer.get("color_rgb", (0, 0, 0))
+            mm_paths = layer.get("mm_paths", [])
 
             if not mm_paths:
                 continue
 
-            lines.append(f"; ===============================")
-            lines.append(f"; Farb-Layer {layer_idx+1}  RGB={color_rgb}")
-            lines.append(f"; TOOL {tool_name}")
-            lines.append(f"; ===============================")
-
-            # vor JEDEM Farb-Layer: zur Palette, Farbe laden
-            lines.append(
-                f"GOTO_PALETTE X{pal_x:.2f} Y{pal_y:.2f} Z{z_up:.2f}"
+            exec_params = self.derive_layer_execution(
+                layer,
+                default_tool=tool_name,
+                default_pressure=pressure,
+                z_down=z_down,
+                z_up=z_up,
+                clean_interval=clean_interval,
             )
+
+            layer_tool = exec_params["tool"]
+            layer_pressure = exec_params["pressure"]
+            layer_z_up = exec_params["z_up"]
+            layer_z_down = exec_params["z_down"]
+            layer_passes = exec_params["passes"]
+            layer_clean_interval = exec_params["clean_interval"]
+            layer_needs_clean = exec_params["needs_cleaning"]
+            layer_stage = exec_params.get("stage")
+            layer_technique = exec_params.get("technique")
+
+            lines.append("; ===============================")
             lines.append(
-                f"LOAD_COLOR R{color_rgb[0]} G{color_rgb[1]} B{color_rgb[2]}"
+                f"; Farb-Layer {layer_idx + 1}  RGB={color_rgb}"
             )
-            lines.append(
-                f"DIP_TOOL X{pal_x:.2f} Y{pal_y:.2f} Z{pal_z:.2f}"
-            )
-            lines.append(f"PRESSURE {pressure:.2f}")
-            lines.append(f"TOOL {tool_name}")
-            lines.append("")
+            if layer_stage:
+                lines.append(f"; Stage: {layer_stage}")
+            if layer_technique:
+                lines.append(f"; Technik: {layer_technique}")
+            lines.append(f"; TOOL {layer_tool}")
+            lines.append("; ===============================")
 
-            local_count_since_clean = 0
-
-            for path in mm_paths:
-                if len(path) < 2:
-                    continue
-
-                start_x, start_y = path[0]
-
-                lines.append(f"; Stroke {stroke_global_id}")
+            for pass_idx in range(layer_passes):
                 lines.append(
-                    f"Z_UP X{start_x:.2f} Y{start_y:.2f} Z{z_up:.2f}"
+                    f"; --- Pass {pass_idx + 1}/{layer_passes} ({layer_tool}) ---"
                 )
                 lines.append(
-                    f"Z_DOWN X{start_x:.2f} Y{start_y:.2f} Z{z_down:.2f}"
+                    f"GOTO_PALETTE X{pal_x:.2f} Y{pal_y:.2f} Z{layer_z_up:.2f}"
                 )
                 lines.append(
-                    f"PEN_DOWN X{start_x:.2f} Y{start_y:.2f}"
+                    f"LOAD_COLOR R{color_rgb[0]} G{color_rgb[1]} B{color_rgb[2]}"
                 )
-
-                for (x_mm, y_mm) in path[1:]:
-                    lines.append(f"MOVE X{x_mm:.2f} Y{y_mm:.2f}")
-
-                lines.append("PEN_UP")
-
-                end_x, end_y = path[-1]
                 lines.append(
-                    f"Z_UP X{end_x:.2f} Y{end_y:.2f} Z{z_up:.2f}"
+                    f"DIP_TOOL X{pal_x:.2f} Y{pal_y:.2f} Z{pal_z:.2f}"
                 )
+                lines.append(f"TOOL {layer_tool}")
+                lines.append(f"PRESSURE {layer_pressure:.2f}")
                 lines.append("")
 
-                stroke_global_id += 1
-                local_count_since_clean += 1
+                local_count_since_clean = 0
 
-                # Reinigung?
-                if needs_cleaning and local_count_since_clean >= clean_interval:
+                for path in mm_paths:
+                    if len(path) < 2:
+                        continue
+
+                    start_x, start_y = path[0]
+
+                    lines.append(f"; Stroke {stroke_global_id}")
                     lines.append(
-                        f"GOTO_WASH X{wash_x:.2f} Y{wash_y:.2f} Z{z_up:.2f}"
+                        f"Z_UP X{start_x:.2f} Y{start_y:.2f} Z{layer_z_up:.2f}"
+                    )
+                    lines.append(
+                        f"Z_DOWN X{start_x:.2f} Y{start_y:.2f} Z{layer_z_down:.2f}"
+                    )
+                    lines.append(
+                        f"PEN_DOWN X{start_x:.2f} Y{start_y:.2f}"
+                    )
+
+                    for (x_mm, y_mm) in path[1:]:
+                        lines.append(f"MOVE X{x_mm:.2f} Y{y_mm:.2f}")
+
+                    lines.append("PEN_UP")
+
+                    end_x, end_y = path[-1]
+                    lines.append(
+                        f"Z_UP X{end_x:.2f} Y{end_y:.2f} Z{layer_z_up:.2f}"
+                    )
+                    lines.append("")
+
+                    stroke_global_id += 1
+                    local_count_since_clean += 1
+
+                    if (
+                        layer_needs_clean
+                        and layer_clean_interval > 0
+                        and local_count_since_clean >= layer_clean_interval
+                    ):
+                        lines.append(
+                            f"GOTO_WASH X{wash_x:.2f} Y{wash_y:.2f} Z{layer_z_up:.2f}"
+                        )
+                        lines.append(
+                            f"CLEAN_TOOL X{wash_x:.2f} Y{wash_y:.2f} Z{wash_z:.2f}"
+                        )
+                        lines.append("")
+                        local_count_since_clean = 0
+
+                if layer_needs_clean:
+                    lines.append(
+                        f"GOTO_WASH X{wash_x:.2f} Y{wash_y:.2f} Z{layer_z_up:.2f}"
                     )
                     lines.append(
                         f"CLEAN_TOOL X{wash_x:.2f} Y{wash_y:.2f} Z{wash_z:.2f}"
                     )
                     lines.append("")
-                    local_count_since_clean = 0
-
-            # nach Layer optional reinigen
-            if needs_cleaning:
-                lines.append(
-                    f"GOTO_WASH X{wash_x:.2f} Y{wash_y:.2f} Z{z_up:.2f}"
-                )
-                lines.append(
-                    f"CLEAN_TOOL X{wash_x:.2f} Y{wash_y:.2f} Z{wash_z:.2f}"
-                )
-                lines.append("")
 
         if not lines:
-            return "; (keine malbaren Layer gefunden)"
+            return "; (keine Pfade gefunden)"
 
         return "\n".join(lines)
 

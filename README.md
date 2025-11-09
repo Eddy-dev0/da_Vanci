@@ -1,6 +1,62 @@
 # da_Vinci
 "When the steel brush touches the soul of colors, the machine paints what humans dare to think."
 
+## Photorealistic Underpainting Translation (New)
+
+This repository now contains a complete, fully-commented PyTorch project that
+teaches a painting robot how to convert layered grayscale underpaintings into
+photorealistic RGB references. The implementation lives in the repository root
+and is composed of the following modules:
+
+* `config.py` – central place for hyperparameters and file-system paths.
+* `dataset.py` – loads paired underpainting/target images and computes feature maps.
+* `model.py` – a U-Net style generator with residual bottleneck.
+* `losses.py` – composite loss combining reconstruction, perceptual and edge terms.
+* `train.py` – end-to-end training loop with checkpointing and visual logging.
+* `inference.py` – command line entry point for generating photorealistic images.
+* `utils.py` – helper utilities for feature extraction and image handling.
+
+### Expected data layout
+
+```
+data/
+  train/
+    underpaint/
+    target/
+  val/
+    underpaint/
+    target/
+```
+
+Underpainting and target images must share identical filenames so that the
+dataset can pair them automatically.
+
+### Installation
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+### Training
+
+```bash
+python train.py
+```
+
+Model checkpoints are written to `checkpoints/` and qualitative samples to
+`results/`.
+
+### Inference
+
+```bash
+python inference.py --input path/to/underpainting.png --output path/to/output.png --checkpoint checkpoints/epoch_0100.pth
+```
+
+The helper function `generate_photo_from_underpainting` is also available for
+integration into larger control stacks.
+
 ## Verbesserte Bildverarbeitung
 
 Die Bildanalyse verwendet jetzt eine mehrstufige High-End-Pipeline, die auf den in
