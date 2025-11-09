@@ -238,3 +238,51 @@ def test_plan_painting_layers_uses_class_impl_when_instance_shadowed(monkeypatch
     assert called_impl
     assert result["layers"]
     assert result["layer_masks"]["background_mask"].shape == (1, 1)
+
+
+def test_plan_painting_layers_recovers_when_impl_removed(monkeypatch):
+    quantize_calls = []
+
+    def fake_quantize(img, *, k_min=8, k_max=16):
+        quantize_calls.append((k_min, k_max))
+        h, w, _ = img.shape
+        lab_q = np.zeros((h, w, 3), dtype=np.float32)
+        centers = np.zeros((1, 3), dtype=np.float32)
+        labels = np.zeros((h, w), dtype=np.int32)
+        return lab_q, centers, labels
+
+    def fake_make_layer_masks(self, image_source):
+        mask = np.ones((2, 2), dtype=np.float32)
+        self.last_layer_analysis = {"score_maps": {}}
+        self.last_enhanced_rgb01 = np.asarray(image_source, dtype=np.float32)
+        return {
+            "background_mask": mask,
+            "mid_mask": np.zeros_like(mask),
+            "detail_mask": np.zeros_like(mask),
+        }
+
+    monkeypatch.delattr(ImageAnalyzer, "_extract_color_layers_impl", raising=False)
+    monkeypatch.setattr(
+        "painterslicer.image_analysis.analyzer.quantize_adaptive_lab",
+        fake_quantize,
+        raising=False,
+    )
+    monkeypatch.setattr(ImageAnalyzer, "make_layer_masks", fake_make_layer_masks)
+    monkeypatch.setattr(ImageAnalyzer, "enhance_image_quality", lambda self, src: None)
+    monkeypatch.setattr(
+        ImageAnalyzer,
+        "_ensure_rgb01",
+        lambda self, src: np.asarray(src, dtype=np.float32),
+        raising=False,
+    )
+
+    analyzer = ImageAnalyzer()
+    analyzer.extract_color_layers = None
+
+    image = np.ones((2, 2, 3), dtype=np.float32)
+
+    result = analyzer.plan_painting_layers(image)
+
+    assert quantize_calls
+    assert result["layers"]
+    assert callable(analyzer.extract_color_layers)
