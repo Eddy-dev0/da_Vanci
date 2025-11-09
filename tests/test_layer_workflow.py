@@ -133,3 +133,56 @@ def test_compose_layers_without_feather_preserves_geometry():
     )
 
     np.testing.assert_allclose(composed, expected)
+
+
+def test_plan_painting_layers_falls_back_without_alias(monkeypatch):
+    called_impl = []
+
+    def fake_extract_color_layers_impl(self, image_source, **kwargs):
+        called_impl.append(True)
+        self.last_color_analysis = {
+            "labels": np.zeros((2, 2), dtype=np.int32),
+        }
+        return [
+            {
+                "label": 0,
+                "color_rgb": (255, 0, 0),
+                "pixel_paths": [[(0, 0), (0, 1), (1, 0), (1, 1)]],
+            }
+        ]
+
+    def fake_make_layer_masks(self, image_source):
+        mask = np.ones((2, 2), dtype=np.float32)
+        self.last_layer_analysis = {"score_maps": {}}
+        self.last_enhanced_rgb01 = np.asarray(image_source, dtype=np.float32)
+        return {
+            "background_mask": mask,
+            "mid_mask": np.zeros_like(mask),
+            "detail_mask": np.zeros_like(mask),
+        }
+
+    monkeypatch.setattr(
+        ImageAnalyzer,
+        "_extract_color_layers_impl",
+        fake_extract_color_layers_impl,
+        raising=False,
+    )
+    monkeypatch.setattr(ImageAnalyzer, "make_layer_masks", fake_make_layer_masks)
+    monkeypatch.setattr(ImageAnalyzer, "enhance_image_quality", lambda self, src: None)
+    monkeypatch.setattr(
+        ImageAnalyzer,
+        "_ensure_rgb01",
+        lambda self, src: np.asarray(src, dtype=np.float32),
+        raising=False,
+    )
+
+    analyzer = ImageAnalyzer()
+    analyzer.extract_color_layers = None
+
+    image = np.ones((2, 2, 3), dtype=np.float32)
+
+    result = analyzer.plan_painting_layers(image)
+
+    assert called_impl
+    assert result["layers"]
+    assert result["layer_masks"]["background_mask"].shape == (2, 2)
