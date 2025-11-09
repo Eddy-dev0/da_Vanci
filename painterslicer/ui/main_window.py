@@ -485,6 +485,42 @@ class MainWindow(QMainWindow):
             self.current_image_path,
             color_layers
         )
+
+        stage_priority = {"background": 0, "mid": 1, "detail": 2}
+        normalized_layers = sorted(
+            normalized_layers,
+            key=lambda layer: (
+                layer.get("order", 1_000_000),
+                stage_priority.get(layer.get("stage"), 1),
+                layer.get("_approx_luminance", 0.0),
+            ),
+        )
+
+        execution_profiles = []
+        for layer in normalized_layers:
+            exec_params = self.slicer.derive_layer_execution(
+                layer,
+                default_tool=self.selected_tool,
+                default_pressure=self.paint_pressure,
+                z_down=self.z_down,
+                z_up=self.z_up,
+                clean_interval=clean_interval,
+            )
+            exec_params.update(
+                {
+                    "color_rgb": layer.get("color_rgb", (0, 0, 0)),
+                    "stage": layer.get("stage"),
+                    "technique": layer.get("technique"),
+                    "coverage": layer.get("coverage"),
+                    "order": layer.get("order"),
+                    "label": layer.get("label"),
+                    "detail_strength": layer.get("detail_strength"),
+                    "highlight_strength": layer.get("highlight_strength"),
+                    "shadow_strength": layer.get("shadow_strength"),
+                    "mm_paths": layer.get("mm_paths", []),
+                }
+            )
+            execution_profiles.append(exec_params)
         # normalized_layers = [
         #   { "color_rgb": (r,g,b), "mm_paths": [ [ (x_mm,y_mm)... ], ... ] },
         #   ...
@@ -511,21 +547,27 @@ class MainWindow(QMainWindow):
         # Eine flache Liste aller Strokes in Mal-Reihenfolge,
         # jeweils mit Farbe und Punkten.
         self.paint_strokes_timeline = []
-        for layer_info, layer in zip(color_layers, normalized_layers):
-            rgb = layer["color_rgb"]
-            stage = layer_info.get("stage")
-            technique = layer_info.get("technique")
-            label = layer_info.get("label")
-            for stroke in layer["mm_paths"]:
-                if len(stroke) < 2:
-                    continue
-                self.paint_strokes_timeline.append({
-                    "color_rgb": rgb,
-                    "points": stroke,  # Liste [(x_mm,y_mm), ...]
-                    "stage": stage,
-                    "technique": technique,
-                    "label": label,
-                })
+        for profile in execution_profiles:
+            mm_paths = profile.get("mm_paths", [])
+            for pass_idx in range(profile.get("passes", 1)):
+                for stroke in mm_paths:
+                    if len(stroke) < 2:
+                        continue
+                    self.paint_strokes_timeline.append(
+                        {
+                            "color_rgb": profile.get("color_rgb"),
+                            "points": stroke,
+                            "stage": profile.get("stage"),
+                            "technique": profile.get("technique"),
+                            "label": profile.get("label"),
+                            "tool": profile.get("tool"),
+                            "pressure": profile.get("pressure"),
+                            "pass_index": pass_idx,
+                            "passes": profile.get("passes"),
+                            "z_down": profile.get("z_down"),
+                            "z_up": profile.get("z_up"),
+                        }
+                    )
 
         # 6. Für "alte" Preview-APIs (render_preview_frame etc.) behalten wir
         # noch eine einfache Liste aller Pfade ohne Farbe
@@ -548,17 +590,37 @@ class MainWindow(QMainWindow):
             lines_out.extend(pipeline_summary)
             lines_out.append("")
         lines_out.extend(plan_lines)
+
+        if execution_profiles:
+            lines_out.append("")
+            lines_out.append("--- Layer Execution Mapping ---")
+            for idx, profile in enumerate(execution_profiles, start=1):
+                color_rgb = profile.get("color_rgb", (0, 0, 0))
+                lines_out.append(
+                    f"Layer {idx} (Stage {profile.get('stage')}, Technik {profile.get('technique')}):"
+                )
+                lines_out.append(f"  Farbe: RGB{color_rgb}")
+                lines_out.append(
+                    f"  Werkzeug: {profile.get('tool')}  Druck: {profile.get('pressure'):.2f}  Pässe: {profile.get('passes')}"
+                )
+                lines_out.append(
+                    f"  Z_down: {profile.get('z_down'):.2f}  Z_up: {profile.get('z_up'):.2f}"
+                )
+                lines_out.append(
+                    f"  Coverage: {profile.get('coverage'):.3f}  Highlights: {profile.get('highlight_strength'):.2f}  Schatten: {profile.get('shadow_strength'):.2f}"
+                )
+                lines_out.append("")
         lines_out.append("\n--- Farb-Layer Info ---\n")
         lines_out.append(f"Anzahl Farblayer: {len(normalized_layers)}\n")
 
-        for idx, (layer_info, layer) in enumerate(zip(color_layers, normalized_layers)):
-            rgb = layer["color_rgb"]
-            coverage_pct = float(layer_info.get("coverage", 0.0) * 100.0)
-            stage = layer_info.get("stage", "?")
-            order = layer_info.get("order", idx)
-            tool = layer_info.get("tool", "-")
-            technique = layer_info.get("technique", "-")
-            path_count = len(layer["mm_paths"])
+        for idx, layer in enumerate(normalized_layers):
+            rgb = layer.get("color_rgb", (0, 0, 0))
+            coverage_pct = float(layer.get("coverage", 0.0) * 100.0)
+            stage = layer.get("stage", "?")
+            order = layer.get("order", idx)
+            tool = layer.get("tool", "-")
+            technique = layer.get("technique", "-")
+            path_count = len(layer.get("mm_paths", []))
             lines_out.append(
                 f"Layer {idx+1:02d} (Order {order}, Stage {stage}): RGB={rgb}, "
                 f"Coverage={coverage_pct:.1f}%, Pfade={path_count}, Werkzeug={tool}, "
@@ -568,14 +630,14 @@ class MainWindow(QMainWindow):
                 "    detail={detail:.2f} mid={mid:.2f} background={bg:.2f} "
                 "texture={tex:.2f} highlight={hi:.2f} shadow={sh:.2f} "
                 "contrast={co:.2f} colorVar={cv:.2f}".format(
-                    detail=float(layer_info.get("detail_ratio", 0.0)),
-                    mid=float(layer_info.get("mid_ratio", 0.0)),
-                    bg=float(layer_info.get("background_ratio", 0.0)),
-                    tex=float(layer_info.get("texture_strength", 0.0)),
-                    hi=float(layer_info.get("highlight_strength", 0.0)),
-                    sh=float(layer_info.get("shadow_strength", 0.0)),
-                    co=float(layer_info.get("contrast_strength", 0.0)),
-                    cv=float(layer_info.get("color_variance_strength", 0.0)),
+                    detail=float(layer.get("detail_ratio", 0.0)),
+                    mid=float(layer.get("mid_ratio", 0.0)),
+                    bg=float(layer.get("background_ratio", 0.0)),
+                    tex=float(layer.get("texture_strength", 0.0)),
+                    hi=float(layer.get("highlight_strength", 0.0)),
+                    sh=float(layer.get("shadow_strength", 0.0)),
+                    co=float(layer.get("contrast_strength", 0.0)),
+                    cv=float(layer.get("color_variance_strength", 0.0)),
                 )
             )
 
