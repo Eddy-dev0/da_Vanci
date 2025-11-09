@@ -496,6 +496,8 @@ class MainWindow(QMainWindow):
             ),
         )
 
+        clean_interval = slicer_style.get("clean_interval") if slicer_style else None
+
         execution_profiles = []
         for layer in normalized_layers:
             exec_params = self.slicer.derive_layer_execution(
@@ -531,8 +533,6 @@ class MainWindow(QMainWindow):
         pressure = self.paint_pressure
         z_up = self.z_up
         z_down = self.z_down
-
-        clean_interval = slicer_style.get("clean_interval") if slicer_style else None
 
         paintcode_multi = self.slicer.multi_layer_paintcode(
             normalized_layers,
