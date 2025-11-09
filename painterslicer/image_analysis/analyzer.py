@@ -469,587 +469,6 @@ class ImageAnalyzer:
             "detail_mask": masks.get("detail"),
         }
 
-    def plan_painting_layers(
-        self,
-        image_source: Union[str, np.ndarray],
-        *,
-        k_colors: Optional[int] = None,
-        k_min: int = 8,
-        k_max: int = 16,
-        style_profile: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Preferred name for planning painting layers."""
-
-        return self._plan_layer_plan(
-            image_source,
-            k_colors=k_colors,
-            k_min=k_min,
-            k_max=k_max,
-            style_profile=style_profile,
-        )
-
-    def plan_printing_layers(
-        self,
-        image_source: Union[str, np.ndarray],
-        *,
-        k_colors: Optional[int] = None,
-        k_min: int = 8,
-        k_max: int = 16,
-        style_profile: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Compat wrapper for analyzers still using the legacy method name."""
-
-        return self._plan_layer_plan(
-            image_source,
-            k_colors=k_colors,
-            k_min=k_min,
-            k_max=k_max,
-            style_profile=style_profile,
-        )
-
-    def plan_printing_layers(
-        self,
-        image_source: Union[str, np.ndarray],
-        *,
-        k_colors: Optional[int] = None,
-        k_min: int = 8,
-        k_max: int = 16,
-        style_profile: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Compat wrapper for analyzers still using the legacy method name."""
-
-        return self.plan_painting_layers(
-            image_source,
-            k_colors=k_colors,
-            k_min=k_min,
-            k_max=k_max,
-            style_profile=style_profile,
-        )
-
-    def plan_painting_layers(
-        self,
-        image_source: Union[str, np.ndarray],
-        *,
-        k_colors: Optional[int] = None,
-        k_min: int = 8,
-        k_max: int = 16,
-        style_profile: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Preferred name for planning painting layers."""
-
-        return self._plan_layer_plan(
-            image_source,
-            k_colors=k_colors,
-            k_min=k_min,
-            k_max=k_max,
-            style_profile=style_profile,
-        )
-
-    def plan_printing_layers(
-        self,
-        image_source: Union[str, np.ndarray],
-        *,
-        k_colors: Optional[int] = None,
-        k_min: int = 8,
-        k_max: int = 16,
-        style_profile: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """Compat wrapper for analyzers still using the legacy method name."""
-
-        return self._plan_layer_plan(
-            image_source,
-            k_colors=k_colors,
-            k_min=k_min,
-            k_max=k_max,
-            style_profile=style_profile,
-        )
-
-    def _plan_layer_plan(
-        self,
-        image_source: Union[str, np.ndarray],
-        *,
-        k_colors: Optional[int] = None,
-        k_min: int = 8,
-        k_max: int = 16,
-        style_profile: Optional[Dict[str, Any]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Erzeugt einen heuristischen Malplan von groben zu feinen Schichten.
-
-        Rückgabeformat::
-
-            {
-                "image_size": (H, W),
-                "layer_masks": {"background_mask": ..., ...},
-                "layers": [
-                    {
-                        "label": int,
-                        "color_rgb": (r, g, b),
-                        "coverage": float,
-                        "stage": "background" | "mid" | "detail",
-                        "tool": str,
-                        "technique": str,
-                        "detail_ratio": float,
-                        "mid_ratio": float,
-                        "background_ratio": float,
-                        "path_count": int,
-                        "path_length": int,
-                        "order": int,
-                        "pixel_paths": [...]
-                    },
-                    ...
-                ],
-            }
-
-        Damit lässt sich das Bild von hinten (große Farbflächen) nach vorne (Details)
-        planen und jeweils ein geeignetes Werkzeug auswählen.
-        """
-
-        enhanced_bgr = self.enhance_image_quality(image_source)
-        if enhanced_bgr is not None and self.last_enhanced_rgb01 is not None:
-            img_rgb01 = self.last_enhanced_rgb01.copy()
-        else:
-            img_rgb01 = self._ensure_rgb01(image_source)
-            img_rgb01 = img_rgb01.copy()
-        img_lab01 = rgb2lab(img_rgb01)
-        H, W = img_rgb01.shape[:2]
-
-        layer_masks = self.make_layer_masks(image_source)
-
-        score_maps = {}
-        if self.last_layer_analysis is not None:
-            score_maps = self.last_layer_analysis.get("score_maps", {})
-        detail_score_map = score_maps.get("detail")
-        mid_score_map = score_maps.get("mid")
-        background_score_map = score_maps.get("background")
-        texture_score_map = score_maps.get("texture")
-
-        style_profile = style_profile or {}
-
-        extract_kwargs: Dict[str, Any] = {
-            "k_colors": style_profile.get("k_colors", k_colors),
-            "k_min": style_profile.get("k_min", k_min),
-            "k_max": style_profile.get("k_max", k_max),
-            "use_dither": style_profile.get("use_dither", True),
-            "min_path_length": style_profile.get("min_path_length", 2),
-            "min_area_ratio": style_profile.get("min_area_ratio", 0.0005),
-            "stroke_spacing_scale": style_profile.get("stroke_spacing_scale", 1.0),
-            "preserve_edge_strokes": style_profile.get("preserve_edge_strokes", False),
-            "detail_edge_boost": style_profile.get("detail_edge_boost", 1.0),
-            "edge_sensitivity": style_profile.get("edge_sensitivity", 1.0),
-            "microtransition_boost": style_profile.get("microtransition_boost", 1.0),
-            "chroma_boost": style_profile.get("chroma_boost", 1.0),
-            "highlight_boost": style_profile.get("highlight_boost", 0.0),
-        }
-
-        extractor = getattr(self, "extract_color_layers", None)
-        if not callable(extractor):
-            impl = getattr(self, "_extract_color_layers_impl", None)
-            if callable(impl):
-                extractor = impl
-            else:
-                class_impl = getattr(type(self), "_extract_color_layers_impl", None)
-                if class_impl is not None and hasattr(class_impl, "__get__"):
-                    extractor = class_impl.__get__(self, type(self))
-                else:
-                    extractor = class_impl
-
-        if not callable(extractor):
-            extractor = MethodType(_fallback_extract_color_layers, self)
-
-        if callable(extractor):
-            self.extract_color_layers = extractor
-        else:
-            raise AttributeError(
-                "ImageAnalyzer is missing a color layer extractor implementation"
-            )
-
-        color_layers = extractor(
-            image_source,
-            **extract_kwargs,
-        )
-
-        labels = None
-        if self.last_color_analysis is not None:
-            labels = self.last_color_analysis.get("labels")
-
-        if labels is None:
-            raise RuntimeError(
-                "labels not available after color extraction; did extract_color_layers fail?"
-            )
-
-        if labels.shape[0] != H or labels.shape[1] != W:
-            labels = cv2.resize(
-                labels.astype(np.int32),
-                (W, H),
-                interpolation=cv2.INTER_NEAREST,
-            )
-
-        background_mask = layer_masks.get("background_mask")
-        mid_mask = layer_masks.get("mid_mask")
-        detail_mask = layer_masks.get("detail_mask")
-
-        if background_mask is not None and background_mask.shape != (H, W):
-            background_mask = cv2.resize(background_mask, (W, H), interpolation=cv2.INTER_NEAREST)
-        if mid_mask is not None and mid_mask.shape != (H, W):
-            mid_mask = cv2.resize(mid_mask, (W, H), interpolation=cv2.INTER_NEAREST)
-        if detail_mask is not None and detail_mask.shape != (H, W):
-            detail_mask = cv2.resize(detail_mask, (W, H), interpolation=cv2.INTER_NEAREST)
-
-        total_pixels = float(H * W)
-
-        def _mask_overlap_ratio(layer_mask: np.ndarray, ref_mask: Optional[np.ndarray]) -> float:
-            if ref_mask is None or ref_mask.max() == 0:
-                return 0.0
-            ref_bool = ref_mask > 0
-            overlap = np.logical_and(layer_mask, ref_bool)
-            layer_area = max(int(np.count_nonzero(layer_mask)), 1)
-            return float(np.count_nonzero(overlap)) / float(layer_area)
-
-        def _mean_score(score_map: Optional[np.ndarray], mask_bool: np.ndarray) -> float:
-            if score_map is None:
-                return 0.0
-            values = score_map[mask_bool]
-            if values.size == 0:
-                return 0.0
-            return float(np.mean(values))
-
-        stage_priority = {"background": 0, "mid": 1, "detail": 2}
-
-        planned_layers: List[Dict[str, Any]] = []
-
-        highlight_bias = float(np.clip(style_profile.get("highlight_bias", 1.0), 0.2, 3.0))
-        shadow_bias = float(np.clip(style_profile.get("shadow_bias", 1.0), 0.2, 3.0))
-        color_variance_bias = float(
-            np.clip(style_profile.get("color_variance_bias", 1.0), 0.2, 3.0)
-        )
-
-        for layer in color_layers:
-            label = int(layer["label"])
-            layer_mask = labels == label
-            layer_area = int(np.count_nonzero(layer_mask))
-            if layer_area == 0:
-                continue
-
-            coverage = layer_area / total_pixels
-            detail_ratio = _mask_overlap_ratio(layer_mask, detail_mask)
-            mid_ratio = _mask_overlap_ratio(layer_mask, mid_mask)
-            background_ratio = _mask_overlap_ratio(layer_mask, background_mask)
-
-            shading_kind = layer.get("shading")
-
-            detail_strength = _mean_score(detail_score_map, layer_mask)
-            mid_strength = _mean_score(mid_score_map, layer_mask)
-            background_strength = _mean_score(background_score_map, layer_mask)
-            texture_strength = _mean_score(texture_score_map, layer_mask)
-
-            highlight_strength = 0.0
-            shadow_strength = 0.0
-            contrast_strength = 0.0
-            color_variance_strength = 0.0
-
-            if np.any(layer_mask):
-                layer_lab = img_lab01[layer_mask]
-                if layer_lab.size:
-                    l_vals = layer_lab[:, 0] / 100.0
-                    if l_vals.size > 0:
-                        if l_vals.size >= 5:
-                            high_pct = float(np.percentile(l_vals, 90))
-                            low_pct = float(np.percentile(l_vals, 10))
-                        else:
-                            high_pct = float(np.max(l_vals))
-                            low_pct = float(np.min(l_vals))
-
-                        high_frac = float(np.mean(l_vals > 0.75))
-                        low_frac = float(np.mean(l_vals < 0.35))
-
-                        highlight_strength = float(
-                            np.clip(
-                                0.6 * high_frac
-                                + 0.4 * max(0.0, high_pct - 0.65) / 0.35,
-                                0.0,
-                                1.0,
-                            )
-                        )
-                        shadow_strength = float(
-                            np.clip(
-                                0.6 * low_frac
-                                + 0.4 * max(0.0, 0.45 - low_pct) / 0.45,
-                                0.0,
-                                1.0,
-                            )
-                        )
-                        contrast_strength = float(
-                            np.clip((high_pct - low_pct) / 0.5, 0.0, 1.0)
-                        )
-
-                    ab = layer_lab[:, 1:]
-                    if ab.size:
-                        chroma = np.sqrt(np.square(ab[:, 0]) + np.square(ab[:, 1]))
-                        chroma_std = float(np.std(chroma))
-                        ab_std = float(np.mean(np.std(ab, axis=0)))
-                        color_variance_strength = float(
-                            np.clip(
-                                0.5 * (chroma_std / 25.0)
-                                + 0.5 * (ab_std / 20.0),
-                                0.0,
-                                1.0,
-                            )
-                        )
-
-            highlight_strength = float(
-                np.clip(highlight_strength * highlight_bias, 0.0, 1.0)
-            )
-            shadow_strength = float(np.clip(shadow_strength * shadow_bias, 0.0, 1.0))
-            color_variance_strength = float(
-                np.clip(color_variance_strength * color_variance_bias, 0.0, 1.0)
-            )
-
-            ratios = {
-                "background": 0.5 * background_ratio + 0.5 * background_strength,
-                "mid": 0.5 * mid_ratio + 0.5 * mid_strength,
-                "detail": 0.5 * detail_ratio + 0.5 * detail_strength,
-            }
-            stage_scores = {
-                "background": ratios["background"]
-                + 0.2 * max(0.0, 0.4 - highlight_strength)
-                + 0.15 * max(0.0, 0.5 - color_variance_strength),
-                "mid": ratios["mid"]
-                + 0.15 * color_variance_strength
-                + 0.1 * texture_strength
-                + 0.1 * shadow_strength,
-                "detail": ratios["detail"]
-                + 0.25 * highlight_strength
-                + 0.2 * contrast_strength
-                + 0.15 * color_variance_strength,
-            }
-            stage_scores["background"] *= float(style_profile.get("background_stage_gain", 1.0))
-            stage_scores["mid"] *= float(style_profile.get("mid_stage_gain", 1.0))
-            stage_scores["detail"] *= float(style_profile.get("detail_stage_gain", 1.0))
-            stage = max(stage_scores, key=stage_scores.get)
-
-            if shading_kind == "highlight" and stage != "detail":
-                stage = "detail"
-            elif shading_kind == "shadow" and stage == "background":
-                stage = "mid"
-
-            path_count = len(layer["pixel_paths"])
-            path_length = int(
-                sum(len(path) for path in layer["pixel_paths"])
-            )
-            density = float(path_length) / float(layer_area)
-            density = float(np.clip(density, 0.0, 1.0))
-
-            tool = "round_brush"
-            technique = "layered_strokes"
-
-            if shading_kind == "highlight":
-                tool = "fine_brush"
-                technique = "luminous_glazing"
-            elif shading_kind == "shadow":
-                tool = "flat_brush" if coverage > 0.08 else "round_brush"
-                technique = "shadow_glaze"
-            elif highlight_strength > 0.65 and detail_ratio > 0.3:
-                tool = "fine_brush"
-                technique = "luminous_glazing"
-            elif shadow_strength > 0.6 and coverage < 0.2:
-                tool = "flat_brush"
-                technique = "shadow_glaze"
-            elif coverage > 0.35 and detail_ratio < 0.25 and shadow_strength < 0.5:
-                tool = "wide_brush"
-                technique = "broad_fill"
-            elif stage == "mid" and 0.08 < coverage < 0.25 and detail_ratio < 0.2:
-                tool = "sponge"
-                technique = "dabbing"
-            elif detail_ratio > 0.55 or density > 0.6 or coverage < 0.05 or detail_strength > 0.55:
-                tool = "fine_brush"
-                technique = "precision_strokes"
-            elif (
-                stage == "mid"
-                and detail_ratio < 0.45
-                and color_variance_strength > 0.5
-            ):
-                tool = "round_brush"
-                technique = "vibrant_impasto"
-            elif stage == "mid" and detail_ratio < 0.45:
-                tool = "flat_brush"
-                technique = "feathering"
-
-            if stage == "background" and background_strength > 0.6 and coverage > 0.2:
-                technique = "gradient_blend"
-            if stage == "detail" and texture_strength > 0.5 and coverage > 0.1:
-                technique = "cross_hatching"
-
-            planned_layers.append({
-                "label": label,
-                "color_rgb": layer["color_rgb"],
-                "coverage": float(coverage),
-                "stage": stage,
-                "tool": tool,
-                "technique": technique,
-                "shading": shading_kind,
-                "detail_ratio": float(detail_ratio),
-                "mid_ratio": float(mid_ratio),
-                "background_ratio": float(background_ratio),
-                "detail_strength": float(detail_strength),
-                "mid_strength": float(mid_strength),
-                "background_strength": float(background_strength),
-                "texture_strength": float(texture_strength),
-                "highlight_strength": float(highlight_strength),
-                "shadow_strength": float(shadow_strength),
-                "contrast_strength": float(contrast_strength),
-                "color_variance_strength": float(color_variance_strength),
-                "path_count": int(path_count),
-                "path_length": int(path_length),
-                "pixel_paths": layer["pixel_paths"],
-                "stage_priority": stage_priority.get(stage, 1),
-            })
-
-        planned_layers.sort(
-            key=lambda entry: (
-                entry["stage_priority"],
-                -entry["background_ratio"],
-                entry["coverage"],
-            )
-        )
-
-        for order, layer in enumerate(planned_layers):
-            layer["order"] = order
-            layer.pop("stage_priority", None)
-
-        return {
-            "image_size": (H, W),
-            "layer_masks": {
-                "background_mask": background_mask,
-                "mid_mask": mid_mask,
-                "detail_mask": detail_mask,
-            },
-            "layers": planned_layers,
-        }
-
-
-def _fallback_extract_color_layers(
-    self: "ImageAnalyzer",
-    image_source: Union[str, np.ndarray],
-    *,
-    k_colors: Optional[int] = None,
-    k_min: int = 8,
-    k_max: int = 16,
-    **_: Any,
-) -> List[Dict[str, Any]]:
-    """Minimal colour layer extractor used when the main implementation is missing."""
-
-    img_rgb01 = self._ensure_rgb01(image_source)
-
-    if k_colors is not None:
-        target_k = max(1, int(k_colors))
-        k_min = target_k
-        k_max = target_k
-
-    lab_quant, centers_lab, labels = quantize_adaptive_lab(
-        img_rgb01,
-        k_min=k_min,
-        k_max=k_max,
-    )
-
-    palette_rgb01 = lab2rgb(centers_lab.reshape(1, -1, 3)).reshape(-1, 3).clip(0.0, 1.0)
-    quant_rgb01 = lab2rgb(lab_quant).clip(0.0, 1.0)
-
-    self.last_color_analysis = {
-        "preprocessed_rgb01": img_rgb01.astype(np.float32),
-        "labels": labels.astype(np.int32),
-        "centers_lab": centers_lab.astype(np.float32),
-        "palette_rgb01": palette_rgb01.astype(np.float32),
-        "quant_rgb01": quant_rgb01.astype(np.float32),
-        "shading_annotations": {},
-    }
-
-    layers: List[Dict[str, Any]] = []
-    total_pixels = float(labels.size) if labels.size else 1.0
-
-    for label in np.unique(labels):
-        mask = labels == label
-        coverage = float(np.count_nonzero(mask) / total_pixels)
-        color_rgb = tuple(
-            int(np.clip(round(c * 255.0), 0, 255)) for c in palette_rgb01[int(label)]
-        )
-        layers.append(
-            {
-                "label": int(label),
-                "color_rgb": color_rgb,
-                "pixel_paths": [],
-                "coverage": float(coverage),
-            }
-        )
-
-    layers.sort(key=lambda entry: entry["label"])
-
-    return layers
-
-
-def _normalise_mask(mask: Optional[np.ndarray]) -> Optional[np.ndarray]:
-    """Convert ``mask`` to a float32 array in the range 0..1."""
-
-    if mask is None:
-        return None
-
-    mask_arr = np.asarray(mask)
-    if mask_arr.ndim == 3:
-        # Collapse possible colour dimension that might have slipped through
-        mask_arr = mask_arr[..., 0]
-
-    mask_arr = mask_arr.astype(np.float32)
-    mask_arr = np.clip(mask_arr, 0.0, None)
-
-    max_val = float(mask_arr.max()) if mask_arr.size else 0.0
-    if max_val > 0:
-        if max_val > 1.0:
-            mask_arr /= max_val
-    return mask_arr
-
-
-def segment_image_into_layers(
-    image_source: Union[str, np.ndarray]
-) -> Dict[str, Dict[str, Optional[np.ndarray]]]:
-    """Segment ``image_source`` into background/mid/detail RGB layers.
-
-    The helper instantiates :class:`ImageAnalyzer`, re-uses its
-    :meth:`make_layer_masks` pipeline and multiplies the resulting masks with the
-    original RGB data (converted to float32 0..1).  The return value bundles the
-    masks as well as the RGB layers to offer a compact, ready-to-use API for
-    downstream processing.
-    """
-
-    analyzer = ImageAnalyzer()
-    masks = analyzer.make_layer_masks(image_source)
-
-    if analyzer.last_enhanced_rgb01 is not None:
-        rgb01 = analyzer.last_enhanced_rgb01.copy()
-    else:
-        rgb01 = analyzer._ensure_rgb01(image_source)
-
-    layer_images: Dict[str, Optional[np.ndarray]] = {}
-    for stage, mask_key in (
-        ("background", "background_mask"),
-        ("mid", "mid_mask"),
-        ("detail", "detail_mask"),
-    ):
-        mask = _normalise_mask(masks.get(mask_key))
-        if mask is None:
-            layer_images[stage] = None
-            continue
-
-        if mask.shape[:2] != rgb01.shape[:2]:
-            mask = cv2.resize(mask, (rgb01.shape[1], rgb01.shape[0]), interpolation=cv2.INTER_NEAREST)
-
-        layer_images[stage] = (rgb01 * mask[..., None]).astype(np.float32)
-
-    return {
-        "masks": masks,
-        "layers": layer_images,
-    }
-
-
 
     def extract_stroke_paths_from_detail(self, image_path: str):
         """
@@ -1649,6 +1068,586 @@ def segment_image_into_layers(
             layer.pop("_lab_l", None)
 
         return layers
+
+    def plan_painting_layers(
+        self,
+        image_source: Union[str, np.ndarray],
+        *,
+        k_colors: Optional[int] = None,
+        k_min: int = 8,
+        k_max: int = 16,
+        style_profile: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Preferred name for planning painting layers."""
+
+        return self._plan_layer_plan(
+            image_source,
+            k_colors=k_colors,
+            k_min=k_min,
+            k_max=k_max,
+            style_profile=style_profile,
+        )
+
+    def plan_printing_layers(
+        self,
+        image_source: Union[str, np.ndarray],
+        *,
+        k_colors: Optional[int] = None,
+        k_min: int = 8,
+        k_max: int = 16,
+        style_profile: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Compat wrapper for analyzers still using the legacy method name."""
+
+        return self._plan_layer_plan(
+            image_source,
+            k_colors=k_colors,
+            k_min=k_min,
+            k_max=k_max,
+            style_profile=style_profile,
+        )
+
+    def plan_printing_layers(
+        self,
+        image_source: Union[str, np.ndarray],
+        *,
+        k_colors: Optional[int] = None,
+        k_min: int = 8,
+        k_max: int = 16,
+        style_profile: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Compat wrapper for analyzers still using the legacy method name."""
+
+        return self.plan_painting_layers(
+            image_source,
+            k_colors=k_colors,
+            k_min=k_min,
+            k_max=k_max,
+            style_profile=style_profile,
+        )
+
+    def plan_painting_layers(
+        self,
+        image_source: Union[str, np.ndarray],
+        *,
+        k_colors: Optional[int] = None,
+        k_min: int = 8,
+        k_max: int = 16,
+        style_profile: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Preferred name for planning painting layers."""
+
+        return self._plan_layer_plan(
+            image_source,
+            k_colors=k_colors,
+            k_min=k_min,
+            k_max=k_max,
+            style_profile=style_profile,
+        )
+
+    def plan_printing_layers(
+        self,
+        image_source: Union[str, np.ndarray],
+        *,
+        k_colors: Optional[int] = None,
+        k_min: int = 8,
+        k_max: int = 16,
+        style_profile: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Compat wrapper for analyzers still using the legacy method name."""
+
+        return self._plan_layer_plan(
+            image_source,
+            k_colors=k_colors,
+            k_min=k_min,
+            k_max=k_max,
+            style_profile=style_profile,
+        )
+
+    def _plan_layer_plan(
+        self,
+        image_source: Union[str, np.ndarray],
+        *,
+        k_colors: Optional[int] = None,
+        k_min: int = 8,
+        k_max: int = 16,
+        style_profile: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """
+        Erzeugt einen heuristischen Malplan von groben zu feinen Schichten.
+
+        Rückgabeformat::
+
+            {
+                "image_size": (H, W),
+                "layer_masks": {"background_mask": ..., ...},
+                "layers": [
+                    {
+                        "label": int,
+                        "color_rgb": (r, g, b),
+                        "coverage": float,
+                        "stage": "background" | "mid" | "detail",
+                        "tool": str,
+                        "technique": str,
+                        "detail_ratio": float,
+                        "mid_ratio": float,
+                        "background_ratio": float,
+                        "path_count": int,
+                        "path_length": int,
+                        "order": int,
+                        "pixel_paths": [...]
+                    },
+                    ...
+                ],
+            }
+
+        Damit lässt sich das Bild von hinten (große Farbflächen) nach vorne (Details)
+        planen und jeweils ein geeignetes Werkzeug auswählen.
+        """
+
+        enhanced_bgr = self.enhance_image_quality(image_source)
+        if enhanced_bgr is not None and self.last_enhanced_rgb01 is not None:
+            img_rgb01 = self.last_enhanced_rgb01.copy()
+        else:
+            img_rgb01 = self._ensure_rgb01(image_source)
+            img_rgb01 = img_rgb01.copy()
+        img_lab01 = rgb2lab(img_rgb01)
+        H, W = img_rgb01.shape[:2]
+
+        layer_masks = self.make_layer_masks(image_source)
+
+        score_maps = {}
+        if self.last_layer_analysis is not None:
+            score_maps = self.last_layer_analysis.get("score_maps", {})
+        detail_score_map = score_maps.get("detail")
+        mid_score_map = score_maps.get("mid")
+        background_score_map = score_maps.get("background")
+        texture_score_map = score_maps.get("texture")
+
+        style_profile = style_profile or {}
+
+        extract_kwargs: Dict[str, Any] = {
+            "k_colors": style_profile.get("k_colors", k_colors),
+            "k_min": style_profile.get("k_min", k_min),
+            "k_max": style_profile.get("k_max", k_max),
+            "use_dither": style_profile.get("use_dither", True),
+            "min_path_length": style_profile.get("min_path_length", 2),
+            "min_area_ratio": style_profile.get("min_area_ratio", 0.0005),
+            "stroke_spacing_scale": style_profile.get("stroke_spacing_scale", 1.0),
+            "preserve_edge_strokes": style_profile.get("preserve_edge_strokes", False),
+            "detail_edge_boost": style_profile.get("detail_edge_boost", 1.0),
+            "edge_sensitivity": style_profile.get("edge_sensitivity", 1.0),
+            "microtransition_boost": style_profile.get("microtransition_boost", 1.0),
+            "chroma_boost": style_profile.get("chroma_boost", 1.0),
+            "highlight_boost": style_profile.get("highlight_boost", 0.0),
+        }
+
+        extractor = getattr(self, "extract_color_layers", None)
+        if not callable(extractor):
+            impl = getattr(self, "_extract_color_layers_impl", None)
+            if callable(impl):
+                extractor = impl
+            else:
+                class_impl = getattr(type(self), "_extract_color_layers_impl", None)
+                if class_impl is not None and hasattr(class_impl, "__get__"):
+                    extractor = class_impl.__get__(self, type(self))
+                else:
+                    extractor = class_impl
+
+        if not callable(extractor):
+            extractor = MethodType(_fallback_extract_color_layers, self)
+
+        if callable(extractor):
+            self.extract_color_layers = extractor
+        else:
+            raise AttributeError(
+                "ImageAnalyzer is missing a color layer extractor implementation"
+            )
+
+        color_layers = extractor(
+            image_source,
+            **extract_kwargs,
+        )
+
+        labels = None
+        if self.last_color_analysis is not None:
+            labels = self.last_color_analysis.get("labels")
+
+        if labels is None:
+            raise RuntimeError(
+                "labels not available after color extraction; did extract_color_layers fail?"
+            )
+
+        if labels.shape[0] != H or labels.shape[1] != W:
+            labels = cv2.resize(
+                labels.astype(np.int32),
+                (W, H),
+                interpolation=cv2.INTER_NEAREST,
+            )
+
+        background_mask = layer_masks.get("background_mask")
+        mid_mask = layer_masks.get("mid_mask")
+        detail_mask = layer_masks.get("detail_mask")
+
+        if background_mask is not None and background_mask.shape != (H, W):
+            background_mask = cv2.resize(background_mask, (W, H), interpolation=cv2.INTER_NEAREST)
+        if mid_mask is not None and mid_mask.shape != (H, W):
+            mid_mask = cv2.resize(mid_mask, (W, H), interpolation=cv2.INTER_NEAREST)
+        if detail_mask is not None and detail_mask.shape != (H, W):
+            detail_mask = cv2.resize(detail_mask, (W, H), interpolation=cv2.INTER_NEAREST)
+
+        total_pixels = float(H * W)
+
+        def _mask_overlap_ratio(layer_mask: np.ndarray, ref_mask: Optional[np.ndarray]) -> float:
+            if ref_mask is None or ref_mask.max() == 0:
+                return 0.0
+            ref_bool = ref_mask > 0
+            overlap = np.logical_and(layer_mask, ref_bool)
+            layer_area = max(int(np.count_nonzero(layer_mask)), 1)
+            return float(np.count_nonzero(overlap)) / float(layer_area)
+
+        def _mean_score(score_map: Optional[np.ndarray], mask_bool: np.ndarray) -> float:
+            if score_map is None:
+                return 0.0
+            values = score_map[mask_bool]
+            if values.size == 0:
+                return 0.0
+            return float(np.mean(values))
+
+        stage_priority = {"background": 0, "mid": 1, "detail": 2}
+
+        planned_layers: List[Dict[str, Any]] = []
+
+        highlight_bias = float(np.clip(style_profile.get("highlight_bias", 1.0), 0.2, 3.0))
+        shadow_bias = float(np.clip(style_profile.get("shadow_bias", 1.0), 0.2, 3.0))
+        color_variance_bias = float(
+            np.clip(style_profile.get("color_variance_bias", 1.0), 0.2, 3.0)
+        )
+
+        for layer in color_layers:
+            label = int(layer["label"])
+            layer_mask = labels == label
+            layer_area = int(np.count_nonzero(layer_mask))
+            if layer_area == 0:
+                continue
+
+            coverage = layer_area / total_pixels
+            detail_ratio = _mask_overlap_ratio(layer_mask, detail_mask)
+            mid_ratio = _mask_overlap_ratio(layer_mask, mid_mask)
+            background_ratio = _mask_overlap_ratio(layer_mask, background_mask)
+
+            shading_kind = layer.get("shading")
+
+            detail_strength = _mean_score(detail_score_map, layer_mask)
+            mid_strength = _mean_score(mid_score_map, layer_mask)
+            background_strength = _mean_score(background_score_map, layer_mask)
+            texture_strength = _mean_score(texture_score_map, layer_mask)
+
+            highlight_strength = 0.0
+            shadow_strength = 0.0
+            contrast_strength = 0.0
+            color_variance_strength = 0.0
+
+            if np.any(layer_mask):
+                layer_lab = img_lab01[layer_mask]
+                if layer_lab.size:
+                    l_vals = layer_lab[:, 0] / 100.0
+                    if l_vals.size > 0:
+                        if l_vals.size >= 5:
+                            high_pct = float(np.percentile(l_vals, 90))
+                            low_pct = float(np.percentile(l_vals, 10))
+                        else:
+                            high_pct = float(np.max(l_vals))
+                            low_pct = float(np.min(l_vals))
+
+                        high_frac = float(np.mean(l_vals > 0.75))
+                        low_frac = float(np.mean(l_vals < 0.35))
+
+                        highlight_strength = float(
+                            np.clip(
+                                0.6 * high_frac
+                                + 0.4 * max(0.0, high_pct - 0.65) / 0.35,
+                                0.0,
+                                1.0,
+                            )
+                        )
+                        shadow_strength = float(
+                            np.clip(
+                                0.6 * low_frac
+                                + 0.4 * max(0.0, 0.45 - low_pct) / 0.45,
+                                0.0,
+                                1.0,
+                            )
+                        )
+                        contrast_strength = float(
+                            np.clip((high_pct - low_pct) / 0.5, 0.0, 1.0)
+                        )
+
+                    ab = layer_lab[:, 1:]
+                    if ab.size:
+                        chroma = np.sqrt(np.square(ab[:, 0]) + np.square(ab[:, 1]))
+                        chroma_std = float(np.std(chroma))
+                        ab_std = float(np.mean(np.std(ab, axis=0)))
+                        color_variance_strength = float(
+                            np.clip(
+                                0.5 * (chroma_std / 25.0)
+                                + 0.5 * (ab_std / 20.0),
+                                0.0,
+                                1.0,
+                            )
+                        )
+
+            highlight_strength = float(
+                np.clip(highlight_strength * highlight_bias, 0.0, 1.0)
+            )
+            shadow_strength = float(np.clip(shadow_strength * shadow_bias, 0.0, 1.0))
+            color_variance_strength = float(
+                np.clip(color_variance_strength * color_variance_bias, 0.0, 1.0)
+            )
+
+            ratios = {
+                "background": 0.5 * background_ratio + 0.5 * background_strength,
+                "mid": 0.5 * mid_ratio + 0.5 * mid_strength,
+                "detail": 0.5 * detail_ratio + 0.5 * detail_strength,
+            }
+            stage_scores = {
+                "background": ratios["background"]
+                + 0.2 * max(0.0, 0.4 - highlight_strength)
+                + 0.15 * max(0.0, 0.5 - color_variance_strength),
+                "mid": ratios["mid"]
+                + 0.15 * color_variance_strength
+                + 0.1 * texture_strength
+                + 0.1 * shadow_strength,
+                "detail": ratios["detail"]
+                + 0.25 * highlight_strength
+                + 0.2 * contrast_strength
+                + 0.15 * color_variance_strength,
+            }
+            stage_scores["background"] *= float(style_profile.get("background_stage_gain", 1.0))
+            stage_scores["mid"] *= float(style_profile.get("mid_stage_gain", 1.0))
+            stage_scores["detail"] *= float(style_profile.get("detail_stage_gain", 1.0))
+            stage = max(stage_scores, key=stage_scores.get)
+
+            if shading_kind == "highlight" and stage != "detail":
+                stage = "detail"
+            elif shading_kind == "shadow" and stage == "background":
+                stage = "mid"
+
+            path_count = len(layer["pixel_paths"])
+            path_length = int(
+                sum(len(path) for path in layer["pixel_paths"])
+            )
+            density = float(path_length) / float(layer_area)
+            density = float(np.clip(density, 0.0, 1.0))
+
+            tool = "round_brush"
+            technique = "layered_strokes"
+
+            if shading_kind == "highlight":
+                tool = "fine_brush"
+                technique = "luminous_glazing"
+            elif shading_kind == "shadow":
+                tool = "flat_brush" if coverage > 0.08 else "round_brush"
+                technique = "shadow_glaze"
+            elif highlight_strength > 0.65 and detail_ratio > 0.3:
+                tool = "fine_brush"
+                technique = "luminous_glazing"
+            elif shadow_strength > 0.6 and coverage < 0.2:
+                tool = "flat_brush"
+                technique = "shadow_glaze"
+            elif coverage > 0.35 and detail_ratio < 0.25 and shadow_strength < 0.5:
+                tool = "wide_brush"
+                technique = "broad_fill"
+            elif stage == "mid" and 0.08 < coverage < 0.25 and detail_ratio < 0.2:
+                tool = "sponge"
+                technique = "dabbing"
+            elif detail_ratio > 0.55 or density > 0.6 or coverage < 0.05 or detail_strength > 0.55:
+                tool = "fine_brush"
+                technique = "precision_strokes"
+            elif (
+                stage == "mid"
+                and detail_ratio < 0.45
+                and color_variance_strength > 0.5
+            ):
+                tool = "round_brush"
+                technique = "vibrant_impasto"
+            elif stage == "mid" and detail_ratio < 0.45:
+                tool = "flat_brush"
+                technique = "feathering"
+
+            if stage == "background" and background_strength > 0.6 and coverage > 0.2:
+                technique = "gradient_blend"
+            if stage == "detail" and texture_strength > 0.5 and coverage > 0.1:
+                technique = "cross_hatching"
+
+            planned_layers.append({
+                "label": label,
+                "color_rgb": layer["color_rgb"],
+                "coverage": float(coverage),
+                "stage": stage,
+                "tool": tool,
+                "technique": technique,
+                "shading": shading_kind,
+                "detail_ratio": float(detail_ratio),
+                "mid_ratio": float(mid_ratio),
+                "background_ratio": float(background_ratio),
+                "detail_strength": float(detail_strength),
+                "mid_strength": float(mid_strength),
+                "background_strength": float(background_strength),
+                "texture_strength": float(texture_strength),
+                "highlight_strength": float(highlight_strength),
+                "shadow_strength": float(shadow_strength),
+                "contrast_strength": float(contrast_strength),
+                "color_variance_strength": float(color_variance_strength),
+                "path_count": int(path_count),
+                "path_length": int(path_length),
+                "pixel_paths": layer["pixel_paths"],
+                "stage_priority": stage_priority.get(stage, 1),
+            })
+
+        planned_layers.sort(
+            key=lambda entry: (
+                entry["stage_priority"],
+                -entry["background_ratio"],
+                entry["coverage"],
+            )
+        )
+
+        for order, layer in enumerate(planned_layers):
+            layer["order"] = order
+            layer.pop("stage_priority", None)
+
+        return {
+            "image_size": (H, W),
+            "layer_masks": {
+                "background_mask": background_mask,
+                "mid_mask": mid_mask,
+                "detail_mask": detail_mask,
+            },
+            "layers": planned_layers,
+        }
+
+
+def _fallback_extract_color_layers(
+    self: "ImageAnalyzer",
+    image_source: Union[str, np.ndarray],
+    *,
+    k_colors: Optional[int] = None,
+    k_min: int = 8,
+    k_max: int = 16,
+    **_: Any,
+) -> List[Dict[str, Any]]:
+    """Minimal colour layer extractor used when the main implementation is missing."""
+
+    img_rgb01 = self._ensure_rgb01(image_source)
+
+    if k_colors is not None:
+        target_k = max(1, int(k_colors))
+        k_min = target_k
+        k_max = target_k
+
+    lab_quant, centers_lab, labels = quantize_adaptive_lab(
+        img_rgb01,
+        k_min=k_min,
+        k_max=k_max,
+    )
+
+    palette_rgb01 = lab2rgb(centers_lab.reshape(1, -1, 3)).reshape(-1, 3).clip(0.0, 1.0)
+    quant_rgb01 = lab2rgb(lab_quant).clip(0.0, 1.0)
+
+    self.last_color_analysis = {
+        "preprocessed_rgb01": img_rgb01.astype(np.float32),
+        "labels": labels.astype(np.int32),
+        "centers_lab": centers_lab.astype(np.float32),
+        "palette_rgb01": palette_rgb01.astype(np.float32),
+        "quant_rgb01": quant_rgb01.astype(np.float32),
+        "shading_annotations": {},
+    }
+
+    layers: List[Dict[str, Any]] = []
+    total_pixels = float(labels.size) if labels.size else 1.0
+
+    for label in np.unique(labels):
+        mask = labels == label
+        coverage = float(np.count_nonzero(mask) / total_pixels)
+        color_rgb = tuple(
+            int(np.clip(round(c * 255.0), 0, 255)) for c in palette_rgb01[int(label)]
+        )
+        layers.append(
+            {
+                "label": int(label),
+                "color_rgb": color_rgb,
+                "pixel_paths": [],
+                "coverage": float(coverage),
+            }
+        )
+
+    layers.sort(key=lambda entry: entry["label"])
+
+    return layers
+
+
+def _normalise_mask(mask: Optional[np.ndarray]) -> Optional[np.ndarray]:
+    """Convert ``mask`` to a float32 array in the range 0..1."""
+
+    if mask is None:
+        return None
+
+    mask_arr = np.asarray(mask)
+    if mask_arr.ndim == 3:
+        # Collapse possible colour dimension that might have slipped through
+        mask_arr = mask_arr[..., 0]
+
+    mask_arr = mask_arr.astype(np.float32)
+    mask_arr = np.clip(mask_arr, 0.0, None)
+
+    max_val = float(mask_arr.max()) if mask_arr.size else 0.0
+    if max_val > 0:
+        if max_val > 1.0:
+            mask_arr /= max_val
+    return mask_arr
+
+
+def segment_image_into_layers(
+    image_source: Union[str, np.ndarray]
+) -> Dict[str, Dict[str, Optional[np.ndarray]]]:
+    """Segment ``image_source`` into background/mid/detail RGB layers.
+
+    The helper instantiates :class:`ImageAnalyzer`, re-uses its
+    :meth:`make_layer_masks` pipeline and multiplies the resulting masks with the
+    original RGB data (converted to float32 0..1).  The return value bundles the
+    masks as well as the RGB layers to offer a compact, ready-to-use API for
+    downstream processing.
+    """
+
+    analyzer = ImageAnalyzer()
+    masks = analyzer.make_layer_masks(image_source)
+
+    if analyzer.last_enhanced_rgb01 is not None:
+        rgb01 = analyzer.last_enhanced_rgb01.copy()
+    else:
+        rgb01 = analyzer._ensure_rgb01(image_source)
+
+    layer_images: Dict[str, Optional[np.ndarray]] = {}
+    for stage, mask_key in (
+        ("background", "background_mask"),
+        ("mid", "mid_mask"),
+        ("detail", "detail_mask"),
+    ):
+        mask = _normalise_mask(masks.get(mask_key))
+        if mask is None:
+            layer_images[stage] = None
+            continue
+
+        if mask.shape[:2] != rgb01.shape[:2]:
+            mask = cv2.resize(mask, (rgb01.shape[1], rgb01.shape[0]), interpolation=cv2.INTER_NEAREST)
+
+        layer_images[stage] = (rgb01 * mask[..., None]).astype(np.float32)
+
+    return {
+        "masks": masks,
+        "layers": layer_images,
+    }
 
 
 def preprocess_for_slicing(img_srgb01: np.ndarray) -> np.ndarray:
