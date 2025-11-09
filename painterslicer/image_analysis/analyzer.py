@@ -654,13 +654,12 @@ class ImageAnalyzer:
                 else:
                     extractor = class_impl
 
-                if not callable(extractor):
-                    extractor = MethodType(_fallback_extract_color_layers, self)
-
-            if callable(extractor):
-                self.extract_color_layers = extractor
-
         if not callable(extractor):
+            extractor = MethodType(_fallback_extract_color_layers, self)
+
+        if callable(extractor):
+            self.extract_color_layers = extractor
+        else:
             raise AttributeError(
                 "ImageAnalyzer is missing a color layer extractor implementation"
             )
