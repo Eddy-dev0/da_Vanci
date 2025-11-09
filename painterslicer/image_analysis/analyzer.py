@@ -50,6 +50,10 @@ class ImageAnalyzer:
         self.last_enhanced_bgr: Optional[np.ndarray] = None
         self._last_enhanced_signature: Optional[Tuple[Any, ...]] = None
 
+        impl = getattr(self, "_extract_color_layers_impl", None)
+        if callable(impl) and "extract_color_layers" not in self.__dict__:
+            self.extract_color_layers = impl
+
     def load_image(self, image_path: str) -> np.ndarray:
         img = cv2.imread(image_path)
         return img
@@ -637,7 +641,15 @@ class ImageAnalyzer:
             "highlight_boost": style_profile.get("highlight_boost", 0.0),
         }
 
-        color_layers = self.extract_color_layers(
+        extractor = getattr(self, "extract_color_layers", None)
+        if not callable(extractor):
+            extractor = getattr(self, "_extract_color_layers_impl", None)
+            if not callable(extractor):
+                raise AttributeError(
+                    "ImageAnalyzer is missing a color layer extractor implementation"
+                )
+
+        color_layers = extractor(
             image_source,
             **extract_kwargs,
         )
