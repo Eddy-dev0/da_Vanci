@@ -502,6 +502,63 @@ class ImageAnalyzer:
             style_profile=style_profile,
         )
 
+    def plan_printing_layers(
+        self,
+        image_source: Union[str, np.ndarray],
+        *,
+        k_colors: Optional[int] = None,
+        k_min: int = 8,
+        k_max: int = 16,
+        style_profile: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Compat wrapper for analyzers still using the legacy method name."""
+
+        return self.plan_painting_layers(
+            image_source,
+            k_colors=k_colors,
+            k_min=k_min,
+            k_max=k_max,
+            style_profile=style_profile,
+        )
+
+    def plan_painting_layers(
+        self,
+        image_source: Union[str, np.ndarray],
+        *,
+        k_colors: Optional[int] = None,
+        k_min: int = 8,
+        k_max: int = 16,
+        style_profile: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Preferred name for planning painting layers."""
+
+        return self._plan_layer_plan(
+            image_source,
+            k_colors=k_colors,
+            k_min=k_min,
+            k_max=k_max,
+            style_profile=style_profile,
+        )
+
+    def plan_printing_layers(
+        self,
+        image_source: Union[str, np.ndarray],
+        *,
+        k_colors: Optional[int] = None,
+        k_min: int = 8,
+        k_max: int = 16,
+        style_profile: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        """Compat wrapper for analyzers still using the legacy method name."""
+
+        return self._plan_layer_plan(
+            image_source,
+            k_colors=k_colors,
+            k_min=k_min,
+            k_max=k_max,
+            style_profile=style_profile,
+        )
+
     def _plan_layer_plan(
         self,
         image_source: Union[str, np.ndarray],
