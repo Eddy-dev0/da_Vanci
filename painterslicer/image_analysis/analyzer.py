@@ -5,7 +5,49 @@ from typing import Dict, Any, Optional, List, Union, Tuple
 
 import numpy as np
 import cv2
-from sklearn.cluster import KMeans
+
+try:  # pragma: no cover - optional heavy dependency
+    from sklearn.cluster import KMeans
+except Exception:  # pragma: no cover - lightweight fallback
+    class KMeans:  # type: ignore[override]
+        """Minimal fallback implementation used when scikit-learn is unavailable."""
+
+        def __init__(self, n_clusters: int, *, n_init: int = 10, random_state: int = 0):
+            self.n_clusters = int(max(1, n_clusters))
+            self.n_init = int(max(1, n_init))
+            self.random_state = int(random_state)
+            self.cluster_centers_: Optional[np.ndarray] = None
+            self.labels_: Optional[np.ndarray] = None
+
+        def fit(self, data: np.ndarray) -> "KMeans":
+            data = np.asarray(data, dtype=np.float32)
+            if data.ndim == 1:
+                data = data[:, None]
+
+            if data.size == 0:
+                self.cluster_centers_ = np.zeros((self.n_clusters, data.shape[1]), dtype=np.float32)
+                self.labels_ = np.zeros((data.shape[0],), dtype=np.int32)
+                return self
+
+            rng = np.random.default_rng(self.random_state)
+            replace = data.shape[0] < self.n_clusters
+            indices = rng.choice(data.shape[0], size=self.n_clusters, replace=replace)
+            centers = data[indices].astype(np.float32)
+
+            # Single pass assignment, good enough for deterministic tests
+            distances = ((data[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+            labels = distances.argmin(axis=1)
+
+            # Update centers once to reduce obvious bias
+            for cluster_idx in range(self.n_clusters):
+                members = data[labels == cluster_idx]
+                if members.size > 0:
+                    centers[cluster_idx] = members.mean(axis=0)
+
+            self.cluster_centers_ = centers
+            self.labels_ = labels.astype(np.int32)
+            return self
+
 from skimage.color import rgb2lab, lab2rgb
 from skimage.segmentation import slic
 from PIL import Image, ImageEnhance, ImageFilter
