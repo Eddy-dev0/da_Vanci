@@ -92,13 +92,14 @@ class BrushTool:
     def kernel(self) -> np.ndarray:
         return self._kernel
 
-    def stamp(self, canvas: np.ndarray, position: Point, color_rgb: ColorTuple) -> None:
-        """Stamp the brush kernel centred around ``position`` on the canvas."""
+    def _stamp_precomputed(
+        self, canvas: np.ndarray, position: Point, color: np.ndarray
+    ) -> None:
+        """Internal helper that assumes ``color`` is a normalised RGB array."""
 
         if canvas.ndim != 3 or canvas.shape[2] != 4:
             raise ValueError("Canvas must have shape (H, W, 4).")
 
-        color = np.asarray(color_rgb, dtype=np.float32) / 255.0
         kernel = self._kernel
         k_h, k_w = kernel.shape
         radius_y = k_h / 2.0
@@ -151,6 +152,12 @@ class BrushTool:
         dst_region[..., :3] = blended_rgb
         dst_region[..., 3] = blended_alpha
 
+    def stamp(self, canvas: np.ndarray, position: Point, color_rgb: ColorTuple) -> None:
+        """Stamp the brush kernel centred around ``position`` on the canvas."""
+
+        color = np.asarray(color_rgb, dtype=np.float32) / 255.0
+        self._stamp_precomputed(canvas, position, color)
+
     def render_path(
         self,
         canvas: np.ndarray,
@@ -163,11 +170,20 @@ class BrushTool:
             return
 
         points = list(points)
-        self.stamp(canvas, points[0], color_rgb)
+        color = np.asarray(color_rgb, dtype=np.float32) / 255.0
+
+        self._stamp_precomputed(canvas, points[0], color)
         if len(points) == 1:
             return
 
         spacing = max(self.spacing_px, 1.0)
+
+        canvas_h, canvas_w = canvas.shape[:2]
+        radius = max(self.width_px / 2.0, 1.0)
+        min_x = -radius
+        max_x = canvas_w + radius
+        min_y = -radius
+        max_y = canvas_h + radius
 
         prev = np.asarray(points[0], dtype=np.float32)
         for current in points[1:]:
@@ -178,11 +194,26 @@ class BrushTool:
                 prev = current_arr
                 continue
 
+            seg_min_x = float(min(prev[0], current_arr[0]))
+            seg_max_x = float(max(prev[0], current_arr[0]))
+            seg_min_y = float(min(prev[1], current_arr[1]))
+            seg_max_y = float(max(prev[1], current_arr[1]))
+            if (
+                seg_max_x < min_x
+                or seg_min_x > max_x
+                or seg_max_y < min_y
+                or seg_min_y > max_y
+            ):
+                prev = current_arr
+                continue
+
             steps = max(int(math.ceil(seg_len / spacing)), 1)
             for step in range(1, steps + 1):
                 t = step / steps
                 pos = prev + seg_vec * t
-                self.stamp(canvas, (float(pos[0]), float(pos[1])), color_rgb)
+                self._stamp_precomputed(
+                    canvas, (float(pos[0]), float(pos[1])), color
+                )
             prev = current_arr
 
 
