@@ -219,6 +219,7 @@ class StrokeInstruction:
     technique: str
     coverage: float
     path: List[Tuple[int, int]]
+    shading: str = ""
 
 
 @dataclass
@@ -426,7 +427,14 @@ class PaintingPipeline:
             dithered = self._cleanup_black_speckles(dithered)
             dithered = self._refine_post_slicing(dithered)
 
-        stroke_plan = self._plan_strokes(dithered, palette, slic_segments, slic_compactness, stroke_spacing_px)
+        stroke_plan = self._plan_strokes(
+            dithered,
+            palette,
+            slic_segments,
+            slic_compactness,
+            stroke_spacing_px,
+            calibrated,
+        )
 
         simulation = self._render_simulation(palette, dithered.shape[:2])
 
@@ -1006,6 +1014,7 @@ class PaintingPipeline:
         slic_segments: int,
         slic_compactness: float,
         stroke_spacing_px: int,
+        calibrated_rgb: np.ndarray,
     ) -> List[StrokeInstruction]:
         rgb = dithered_rgb
         H, W, _ = rgb.shape
@@ -1052,7 +1061,122 @@ class PaintingPipeline:
                 )
 
         instructions.sort(key=lambda inst: (self._stage_priority(inst.stage), -inst.coverage))
+
+        accent_instructions = self._plan_accent_passes(
+            calibrated_rgb,
+            stroke_spacing_px=max(1, stroke_spacing_px // 2),
+        )
+        if accent_instructions:
+            instructions.extend(accent_instructions)
+
         return instructions
+
+    def _plan_accent_passes(
+        self,
+        calibrated_rgb: np.ndarray,
+        *,
+        stroke_spacing_px: int,
+    ) -> List[StrokeInstruction]:
+        if calibrated_rgb is None:
+            return []
+
+        rgb = np.asarray(calibrated_rgb, dtype=np.float32)
+        if rgb.size == 0:
+            return []
+
+        H, W, _ = rgb.shape
+        highlight_mask, shadow_mask = self._extract_highlight_shadow_masks(rgb)
+
+        accent_instructions: List[StrokeInstruction] = []
+        for shading, mask in (("shadow", shadow_mask), ("highlight", highlight_mask)):
+            if mask is None or not np.any(mask):
+                continue
+
+            coverage = float(np.count_nonzero(mask)) / float(H * W)
+            if coverage <= 0.0005:
+                continue
+
+            mean_color = np.mean(rgb[mask], axis=0) if np.any(mask) else np.zeros(3)
+            if shading == "highlight":
+                adjusted = np.clip(mean_color + 0.05, 0.0, 1.0)
+                technique = "luminous_glazing"
+                tool = "highlight_brush"
+            else:
+                adjusted = np.clip(mean_color - 0.05, 0.0, 1.0)
+                technique = "shadow_glaze"
+                tool = "shadow_brush"
+
+            color_rgb = tuple((adjusted * 255).astype(np.uint8))
+
+            mask_uint8 = (mask.astype(np.uint8) * 255)
+            contours = self.analyzer.mask_to_offset_contours(
+                mask_uint8,
+                spacing_px=max(1, stroke_spacing_px),
+                min_len=4,
+            )
+
+            for path in contours:
+                if len(path) < 2:
+                    continue
+                accent_instructions.append(
+                    StrokeInstruction(
+                        color_rgb=color_rgb,
+                        stage="detail",
+                        tool=tool,
+                        technique=technique,
+                        coverage=coverage,
+                        path=path,
+                        shading=shading,
+                    )
+                )
+
+        return accent_instructions
+
+    def _extract_highlight_shadow_masks(
+        self, calibrated_rgb: np.ndarray
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        rgb = np.clip(calibrated_rgb, 0.0, 1.0).astype(np.float32)
+        if rgb.size == 0:
+            empty = np.zeros(rgb.shape[:2], dtype=bool)
+            return empty, empty
+
+        lab = cv2.cvtColor((rgb * 255.0).astype(np.uint8), cv2.COLOR_RGB2LAB)
+        L_channel = lab[:, :, 0].astype(np.float32) / 255.0
+
+        highlight_thr = float(np.percentile(L_channel, 93.0))
+        shadow_thr = float(np.percentile(L_channel, 12.0))
+
+        highlight_mask = L_channel >= highlight_thr
+        shadow_mask = L_channel <= shadow_thr
+
+        # Prevent overlap and remove tiny noise speckles
+        highlight_mask = np.logical_and(highlight_mask, np.logical_not(shadow_mask))
+        highlight_mask = self._refine_mask(highlight_mask, open_iterations=1, dilate_iterations=1)
+        shadow_mask = self._refine_mask(shadow_mask, open_iterations=1, dilate_iterations=2)
+
+        if highlight_mask.size and shadow_mask.size:
+            shadow_mask = np.logical_and(shadow_mask, np.logical_not(highlight_mask))
+
+        return highlight_mask, shadow_mask
+
+    def _refine_mask(
+        self,
+        mask: np.ndarray,
+        *,
+        open_iterations: int = 1,
+        dilate_iterations: int = 1,
+    ) -> np.ndarray:
+        if mask is None or mask.size == 0:
+            return mask
+
+        mask_uint8 = mask.astype(np.uint8)
+        kernel = np.ones((3, 3), np.uint8)
+        if open_iterations > 0:
+            mask_uint8 = cv2.morphologyEx(mask_uint8, cv2.MORPH_OPEN, kernel, iterations=open_iterations)
+        if dilate_iterations > 0:
+            mask_uint8 = cv2.dilate(mask_uint8, kernel, iterations=dilate_iterations)
+        refined = cv2.morphologyEx(mask_uint8, cv2.MORPH_ERODE, kernel, iterations=1)
+        return refined.astype(bool)
 
     def _stage_from_coverage(self, coverage: float, delta_e_values: np.ndarray) -> str:
         mean_delta = float(np.mean(delta_e_values)) if delta_e_values.size else 0.0

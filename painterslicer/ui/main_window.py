@@ -490,14 +490,31 @@ class MainWindow(QMainWindow):
         )
 
         stage_priority = {"background": 0, "mid": 1, "detail": 2}
-        normalized_layers = sorted(
-            normalized_layers,
-            key=lambda layer: (
+
+        def _sort_key(layer: Dict[str, Any]) -> Tuple[int, int, float]:
+            return (
                 layer.get("order", 1_000_000),
                 stage_priority.get(layer.get("stage"), 1),
                 layer.get("_approx_luminance", 0.0),
-            ),
+            )
+
+        accent_layers = [
+            layer for layer in normalized_layers if layer.get("shading") in {"highlight", "shadow"}
+        ]
+        base_layers = [
+            layer for layer in normalized_layers if layer.get("shading") not in {"highlight", "shadow"}
+        ]
+
+        base_layers.sort(key=_sort_key)
+        accent_layers.sort(
+            key=lambda layer: (
+                layer.get("order", 1_000_000),
+                0 if layer.get("shading") == "shadow" else 1,
+                layer.get("_approx_luminance", 0.0),
+            )
         )
+
+        normalized_layers = base_layers + accent_layers
 
         clean_interval = slicer_style.get("clean_interval") if slicer_style else None
 
@@ -516,6 +533,7 @@ class MainWindow(QMainWindow):
                     "color_rgb": layer.get("color_rgb", (0, 0, 0)),
                     "stage": layer.get("stage"),
                     "technique": layer.get("technique"),
+                    "shading": layer.get("shading"),
                     "coverage": layer.get("coverage"),
                     "order": layer.get("order"),
                     "label": layer.get("label"),
@@ -563,6 +581,7 @@ class MainWindow(QMainWindow):
                             "stage": profile.get("stage"),
                             "technique": profile.get("technique"),
                             "label": profile.get("label"),
+                            "shading": profile.get("shading"),
                             "tool": profile.get("tool"),
                             "pressure": profile.get("pressure"),
                             "pass_index": pass_idx,
@@ -987,6 +1006,18 @@ class MainWindow(QMainWindow):
                         "edge_softness": 0.25,
                         "flow": 0.9,
                     },
+                    "highlight_brush": {
+                        "width_px": 9,
+                        "opacity": 0.97,
+                        "edge_softness": 0.2,
+                        "flow": 0.95,
+                    },
+                    "shadow_brush": {
+                        "width_px": 10,
+                        "opacity": 0.93,
+                        "edge_softness": 0.26,
+                        "flow": 0.9,
+                    },
                 },
             },
             "Galerie - Realismus": {
@@ -1039,6 +1070,18 @@ class MainWindow(QMainWindow):
                         "opacity": 0.92,
                         "edge_softness": 0.4,
                         "flow": 0.88,
+                    },
+                    "highlight_brush": {
+                        "width_px": 9,
+                        "opacity": 0.98,
+                        "edge_softness": 0.24,
+                        "flow": 0.95,
+                    },
+                    "shadow_brush": {
+                        "width_px": 11,
+                        "opacity": 0.92,
+                        "edge_softness": 0.32,
+                        "flow": 0.9,
                     },
                 },
             },
@@ -1093,6 +1136,18 @@ class MainWindow(QMainWindow):
                         "opacity": 0.94,
                         "edge_softness": 0.5,
                         "flow": 0.9,
+                    },
+                    "highlight_brush": {
+                        "width_px": 9,
+                        "opacity": 0.99,
+                        "edge_softness": 0.22,
+                        "flow": 0.96,
+                    },
+                    "shadow_brush": {
+                        "width_px": 11,
+                        "opacity": 0.94,
+                        "edge_softness": 0.3,
+                        "flow": 0.92,
                     },
                 },
             },
@@ -1154,6 +1209,18 @@ class MainWindow(QMainWindow):
                         "opacity": 0.58,
                         "edge_softness": 0.95,
                         "flow": 0.38,
+                    },
+                    "highlight_brush": {
+                        "width_px": 10,
+                        "opacity": 0.99,
+                        "edge_softness": 0.2,
+                        "flow": 0.97,
+                    },
+                    "shadow_brush": {
+                        "width_px": 12,
+                        "opacity": 0.95,
+                        "edge_softness": 0.28,
+                        "flow": 0.93,
                     },
                 },
                 "pipeline": {
@@ -1395,6 +1462,7 @@ class MainWindow(QMainWindow):
                     "stage": getattr(instr, "stage", ""),
                     "technique": getattr(instr, "technique", ""),
                     "tool": getattr(instr, "tool", ""),
+                    "shading": getattr(instr, "shading", ""),
                     "points": mm_path,
                 }
             )

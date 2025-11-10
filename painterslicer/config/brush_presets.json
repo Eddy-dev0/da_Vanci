@@ -26,6 +26,24 @@
     "edge_softness": 0.35,
     "flow": 0.85
   },
+  "highlight_brush": {
+    "max_pressure": 0.28,
+    "color_rgb": [255, 255, 255],
+    "needs_cleaning": true,
+    "width_px": 10,
+    "opacity": 0.96,
+    "edge_softness": 0.22,
+    "flow": 0.92
+  },
+  "shadow_brush": {
+    "max_pressure": 0.32,
+    "color_rgb": [16, 16, 16],
+    "needs_cleaning": true,
+    "width_px": 12,
+    "opacity": 0.9,
+    "edge_softness": 0.3,
+    "flow": 0.88
+  },
   "sponge": {
     "max_pressure": 0.2,
     "color_rgb": [230, 230, 230],
