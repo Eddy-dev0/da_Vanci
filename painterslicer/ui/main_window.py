@@ -60,7 +60,7 @@ class MainWindow(QMainWindow):
         self.active_style_profile: Dict[str, Any] = {}
         self.active_pipeline_profile: Dict[str, Any] = {}
         self._active_brush_overrides: Dict[str, Dict[str, Any]] = {}
-        self._brush_tool_cache: Dict[Tuple[str, Tuple[Tuple[str, Any], ...]], BrushTool] = {}
+        self._brush_tool_cache: Dict[Tuple[str, Any], BrushTool] = {}
         self._apply_style_profile(self.selected_style_key)
 
         self.last_pipeline_result: Optional[PipelineResult] = None
@@ -1540,7 +1540,7 @@ class MainWindow(QMainWindow):
         opacity: Optional[float] = None,
     ) -> BrushTool:
         params = self._get_brush_parameters(tool_name, brush_config, opacity)
-        cache_key = (tool_name, tuple(sorted(params.items())))
+        cache_key = (tool_name, self._make_hashable(params))
         brush = self._brush_tool_cache.get(cache_key)
         if brush is not None:
             return brush
@@ -1554,6 +1554,16 @@ class MainWindow(QMainWindow):
         )
         self._brush_tool_cache[cache_key] = brush
         return brush
+
+    def _make_hashable(self, value: Any) -> Any:
+        """Convert nested structures into hashable equivalents for cache keys."""
+        if isinstance(value, dict):
+            return tuple(sorted((k, self._make_hashable(v)) for k, v in value.items()))
+        if isinstance(value, list):
+            return tuple(self._make_hashable(v) for v in value)
+        if isinstance(value, set):
+            return tuple(sorted(self._make_hashable(v) for v in value))
+        return value
 
     def _mm_to_canvas_px(
         self,
