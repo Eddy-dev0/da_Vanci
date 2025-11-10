@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from typing import Dict, Tuple
 
-import torch
-import torch.nn as nn
-import torch.nn.functional as F
 from torchvision import models
+
+from torch_utils import ensure_torch_available, nn, torch
+
+ensure_torch_available()
+
+import torch.nn.functional as F
 
 
 class VGGFeatureExtractor(nn.Module):

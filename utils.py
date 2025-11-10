@@ -16,8 +16,12 @@ from typing import Dict
 
 import cv2
 import numpy as np
-import torch
 from PIL import Image
+
+from torch_utils import ensure_torch_available, torch
+
+
+ensure_torch_available()
 
 
 def _ensure_three_channel(image: np.ndarray) -> np.ndarray:

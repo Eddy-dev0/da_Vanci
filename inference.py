@@ -6,11 +6,14 @@ import argparse
 from pathlib import Path
 
 import numpy as np
-import torch
 
 from config import Config
 from model import UnderpaintingToPhotoModel
+from torch_utils import ensure_torch_available, torch
 from utils import analyze_underpainting, load_image, stack_feature_maps, tensor_to_image
+
+
+ensure_torch_available()
 
 
 def load_model(checkpoint_path: Path, cfg: Config) -> UnderpaintingToPhotoModel:

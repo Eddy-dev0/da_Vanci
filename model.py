@@ -4,16 +4,31 @@ from __future__ import annotations
 
 from typing import List, Tuple
 
-import torch
-import torch.nn as nn
+from torch_utils import ensure_torch_available, nn, torch
 
 
-def conv_block(in_channels: int, out_channels: int, *, kernel_size: int = 3, stride: int = 1) -> nn.Sequential:
+ensure_torch_available()
+
+
+def conv_block(
+    in_channels: int,
+    out_channels: int,
+    *,
+    kernel_size: int = 3,
+    stride: int = 1,
+) -> nn.Sequential:
     """Create a standard convolutional block used throughout the U-Net."""
 
     padding = kernel_size // 2
     return nn.Sequential(
-        nn.Conv2d(in_channels, out_channels, kernel_size=kernel_size, stride=stride, padding=padding, bias=False),
+        nn.Conv2d(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=padding,
+            bias=False,
+        ),
         nn.BatchNorm2d(out_channels),
         nn.LeakyReLU(0.2, inplace=True),
     )
@@ -62,7 +77,12 @@ class UnderpaintingToPhotoModel(nn.Module):
     photorealistic rendering.
     """
 
-    def __init__(self, in_channels: int = 5, out_channels: int = 3, feature_channels: Tuple[int, ...] | None = None) -> None:
+    def __init__(
+        self,
+        in_channels: int = 5,
+        out_channels: int = 3,
+        feature_channels: Tuple[int, ...] | None = None,
+    ) -> None:
         super().__init__()
         if feature_channels is None:
             feature_channels = (64, 128, 256, 512, 512)
@@ -116,7 +136,15 @@ class UnderpaintingToPhotoModel(nn.Module):
             if skip.shape[-2:] != out.shape[-2:]:
                 diff_y = skip.shape[-2] - out.shape[-2]
                 diff_x = skip.shape[-1] - out.shape[-1]
-                out = nn.functional.pad(out, (diff_x // 2, diff_x - diff_x // 2, diff_y // 2, diff_y - diff_y // 2))
+                out = nn.functional.pad(
+                    out,
+                    (
+                        diff_x // 2,
+                        diff_x - diff_x // 2,
+                        diff_y // 2,
+                        diff_y - diff_y // 2,
+                    ),
+                )
             out = torch.cat([out, skip], dim=1)
             out = self.decoder[idx + 1](out)
 
@@ -124,4 +152,3 @@ class UnderpaintingToPhotoModel(nn.Module):
 
 
 __all__ = ["UnderpaintingToPhotoModel"]
-
