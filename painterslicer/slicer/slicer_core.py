@@ -354,6 +354,15 @@ class PainterSlicer:
         stage_to_tool = layer.get("tool")
         tool = stage_to_tool if isinstance(stage_to_tool, str) else default_tool
 
+        if shading == "highlight":
+            tool = "highlight_brush"
+            if not technique:
+                technique = "luminous_glazing"
+        elif shading == "shadow":
+            tool = "shadow_brush"
+            if not technique:
+                technique = "shadow_glaze"
+
         brush_meta = self.get_brush_settings(tool)
         preset_pressure = brush_meta.get("default_pressure")
         if preset_pressure is None:
@@ -494,14 +503,32 @@ class PainterSlicer:
         wash_z = float(wash.get("z", z_up))
 
         stage_priority = {"background": 0, "mid": 1, "detail": 2}
-        normalized_layers = sorted(
-            normalized_layers,
+
+        def _base_sort_key(layer: Dict[str, Any]) -> Tuple[int, int, float]:
+            return (
+                layer.get("order", 1_000_000),
+                stage_priority.get(layer.get("stage"), 1),
+                layer.get("_approx_luminance", 0.0),
+            )
+
+        accent_layers: List[Dict[str, Any]] = []
+        base_layers: List[Dict[str, Any]] = []
+        for layer in normalized_layers:
+            if layer.get("shading") in {"highlight", "shadow"}:
+                accent_layers.append(layer)
+            else:
+                base_layers.append(layer)
+
+        base_layers.sort(key=_base_sort_key)
+        accent_layers.sort(
             key=lambda L: (
                 L.get("order", 1_000_000),
-                stage_priority.get(L.get("stage"), 1),
+                0 if L.get("shading") == "shadow" else 1,
                 L.get("_approx_luminance", 0.0),
-            ),
+            )
         )
+
+        normalized_layers = base_layers + accent_layers
 
         for layer_idx, layer in enumerate(normalized_layers):
             color_rgb = layer.get("color_rgb", (0, 0, 0))
@@ -528,6 +555,7 @@ class PainterSlicer:
             layer_needs_clean = exec_params["needs_cleaning"]
             layer_stage = exec_params.get("stage")
             layer_technique = exec_params.get("technique")
+            layer_shading = exec_params.get("shading")
 
             lines.append("; ===============================")
             lines.append(
@@ -537,6 +565,8 @@ class PainterSlicer:
                 lines.append(f"; Stage: {layer_stage}")
             if layer_technique:
                 lines.append(f"; Technik: {layer_technique}")
+            if layer_shading:
+                lines.append(f"; Shading: {layer_shading}")
             lines.append(f"; TOOL {layer_tool}")
             lines.append("; ===============================")
 
