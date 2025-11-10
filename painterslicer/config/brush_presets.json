@@ -2,21 +2,37 @@
   "broad_brush": {
     "max_pressure": 0.8,
     "color_rgb": [200, 180, 160],
-    "needs_cleaning": true
+    "needs_cleaning": true,
+    "width_px": 48,
+    "opacity": 0.8,
+    "edge_softness": 0.65,
+    "flow": 0.55
   },
   "medium_brush": {
     "max_pressure": 0.5,
     "color_rgb": [160, 120, 90],
-    "needs_cleaning": true
+    "needs_cleaning": true,
+    "width_px": 26,
+    "opacity": 0.82,
+    "edge_softness": 0.5,
+    "flow": 0.7
   },
   "fine_brush": {
     "max_pressure": 0.3,
     "color_rgb": [20, 20, 20],
-    "needs_cleaning": true
+    "needs_cleaning": true,
+    "width_px": 14,
+    "opacity": 0.9,
+    "edge_softness": 0.35,
+    "flow": 0.85
   },
   "sponge": {
     "max_pressure": 0.2,
     "color_rgb": [230, 230, 230],
-    "needs_cleaning": false
+    "needs_cleaning": false,
+    "width_px": 60,
+    "opacity": 0.6,
+    "edge_softness": 0.9,
+    "flow": 0.4
   }
 }

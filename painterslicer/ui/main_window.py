@@ -20,15 +20,16 @@ from PySide6.QtWidgets import (
     # plus: in den Builder-Funktionen importieren wir dynamisch weitere Widgets,
     # das ist ok.
 )
-from PySide6.QtGui import QIcon, QAction, QPixmap, QImage, QPainter, QPen, QColor
+from PySide6.QtGui import QIcon, QAction, QPixmap, QImage
 from PySide6.QtCore import Qt, QTimer
 
 import cv2
 import numpy as np
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 from painterslicer.image_analysis.analyzer import ImageAnalyzer
 from painterslicer.image_analysis.pipeline import PaintingPipeline, PipelineResult
 from painterslicer.slicer.slicer_core import PainterSlicer
+from painterslicer.utils.brush_tool import BrushTool
 
 
 LOGGER = logging.getLogger(__name__)
@@ -57,6 +58,8 @@ class MainWindow(QMainWindow):
             self.selected_style_key = next(iter(self.paint_styles.keys()))
         self.active_style_profile: Dict[str, Any] = {}
         self.active_pipeline_profile: Dict[str, Any] = {}
+        self._active_brush_overrides: Dict[str, Dict[str, Any]] = {}
+        self._brush_tool_cache: Dict[str, Tuple[Dict[str, Any], BrushTool]] = {}
         self._apply_style_profile(self.selected_style_key)
 
         self.last_pipeline_result: Optional[PipelineResult] = None
@@ -965,6 +968,26 @@ class MainWindow(QMainWindow):
                     "num_glaze_passes": 3,
                     "clean_interval": 5,
                 },
+                "brushes": {
+                    "broad_brush": {
+                        "width_px": 42,
+                        "opacity": 0.78,
+                        "edge_softness": 0.4,
+                        "flow": 0.65,
+                    },
+                    "medium_brush": {
+                        "width_px": 24,
+                        "opacity": 0.82,
+                        "edge_softness": 0.35,
+                        "flow": 0.78,
+                    },
+                    "fine_brush": {
+                        "width_px": 12,
+                        "opacity": 0.9,
+                        "edge_softness": 0.25,
+                        "flow": 0.9,
+                    },
+                },
             },
             "Galerie - Realismus": {
                 "description": (
@@ -997,6 +1020,26 @@ class MainWindow(QMainWindow):
                     "grid_mm": 0.22,
                     "num_glaze_passes": 4,
                     "clean_interval": 4,
+                },
+                "brushes": {
+                    "broad_brush": {
+                        "width_px": 50,
+                        "opacity": 0.82,
+                        "edge_softness": 0.6,
+                        "flow": 0.6,
+                    },
+                    "medium_brush": {
+                        "width_px": 26,
+                        "opacity": 0.86,
+                        "edge_softness": 0.55,
+                        "flow": 0.72,
+                    },
+                    "fine_brush": {
+                        "width_px": 13,
+                        "opacity": 0.92,
+                        "edge_softness": 0.4,
+                        "flow": 0.88,
+                    },
                 },
             },
             "Classic Style": {
@@ -1031,6 +1074,26 @@ class MainWindow(QMainWindow):
                     "grid_mm": 0.15,
                     "num_glaze_passes": 7,
                     "clean_interval": 2,
+                },
+                "brushes": {
+                    "broad_brush": {
+                        "width_px": 52,
+                        "opacity": 0.84,
+                        "edge_softness": 0.72,
+                        "flow": 0.58,
+                    },
+                    "medium_brush": {
+                        "width_px": 28,
+                        "opacity": 0.9,
+                        "edge_softness": 0.65,
+                        "flow": 0.76,
+                    },
+                    "fine_brush": {
+                        "width_px": 14,
+                        "opacity": 0.94,
+                        "edge_softness": 0.5,
+                        "flow": 0.9,
+                    },
                 },
             },
             "Original": {
@@ -1067,6 +1130,32 @@ class MainWindow(QMainWindow):
                     "num_glaze_passes": 9,
                     "clean_interval": 2,
                 },
+                "brushes": {
+                    "broad_brush": {
+                        "width_px": 54,
+                        "opacity": 0.85,
+                        "edge_softness": 0.78,
+                        "flow": 0.6,
+                    },
+                    "medium_brush": {
+                        "width_px": 30,
+                        "opacity": 0.9,
+                        "edge_softness": 0.68,
+                        "flow": 0.78,
+                    },
+                    "fine_brush": {
+                        "width_px": 15,
+                        "opacity": 0.96,
+                        "edge_softness": 0.48,
+                        "flow": 0.92,
+                    },
+                    "sponge": {
+                        "width_px": 68,
+                        "opacity": 0.58,
+                        "edge_softness": 0.95,
+                        "flow": 0.38,
+                    },
+                },
                 "pipeline": {
                     "run_pipeline": True,
                     "enable_superres": True,
@@ -1101,6 +1190,12 @@ class MainWindow(QMainWindow):
         self.active_pipeline_profile = dict(profile.get("pipeline", {}))
         slicer_profile = profile.get("slicer", {})
         self.slicer.apply_style_profile(slicer_profile)
+        self._active_brush_overrides = {
+            key: dict(value)
+            for key, value in profile.get("brushes", {}).items()
+        }
+        self.slicer.apply_brush_overrides(self._active_brush_overrides)
+        self._brush_tool_cache.clear()
 
     def _prepare_planning_source(
         self,
@@ -1390,15 +1485,130 @@ class MainWindow(QMainWindow):
 
 
 
+    def _get_brush_parameters(self, tool_name: str) -> Dict[str, Any]:
+        params = self.slicer.get_brush_settings(tool_name)
+        return params
+
+    def _get_brush_tool(self, tool_name: str) -> BrushTool:
+        params = self._get_brush_parameters(tool_name)
+        cache_entry = self._brush_tool_cache.get(tool_name)
+        if cache_entry and cache_entry[0] == params:
+            return cache_entry[1]
+
+        brush = BrushTool(
+            width_px=params.get("width_px", 24.0),
+            opacity=params.get("opacity", 0.85),
+            edge_softness=params.get("edge_softness", 0.5),
+            flow=params.get("flow", 0.7),
+            spacing_px=params.get("spacing_px"),
+        )
+        self._brush_tool_cache[tool_name] = (dict(params), brush)
+        return brush
+
+    def _mm_to_canvas_px(
+        self,
+        point: Tuple[float, float],
+        canvas_w: int,
+        canvas_h: int,
+        work_w: float,
+        work_h: float,
+    ) -> Tuple[float, float]:
+        x_mm, y_mm = point
+        x_px = (x_mm / work_w) * canvas_w
+        y_px = (y_mm / work_h) * canvas_h
+        return (x_px, y_px)
+
+    def _stroke_points_to_px(
+        self,
+        stroke: Dict[str, Any],
+        canvas_w: int,
+        canvas_h: int,
+        work_w: float,
+        work_h: float,
+    ) -> List[Tuple[float, float]]:
+        pts = stroke.get("points", [])
+        return [self._mm_to_canvas_px(pt, canvas_w, canvas_h, work_w, work_h) for pt in pts]
+
+    def _paint_stroke_with_limit(
+        self,
+        canvas: np.ndarray,
+        stroke: Dict[str, Any],
+        canvas_w: int,
+        canvas_h: int,
+        work_w: float,
+        work_h: float,
+        segments_completed: Optional[int] = None,
+    ) -> None:
+        points_px = self._stroke_points_to_px(stroke, canvas_w, canvas_h, work_w, work_h)
+        if not points_px:
+            return
+
+        color_rgb = tuple(stroke.get("color_rgb", (255, 255, 255)))
+        tool_name = str(stroke.get("tool", "medium_brush"))
+        brush = self._get_brush_tool(tool_name)
+
+        total_segments = max(len(points_px) - 1, 0)
+        if segments_completed is None or segments_completed >= total_segments:
+            brush.render_path(canvas, points_px, color_rgb)
+            return
+
+        segments_completed = max(0, int(segments_completed))
+        if segments_completed == 0:
+            brush.stamp(canvas, points_px[0], color_rgb)
+            return
+
+        partial_points = points_px[: segments_completed + 1]
+        brush.render_path(canvas, partial_points, color_rgb)
+
+    def _render_strokes_to_array(
+        self,
+        upto_stroke: Optional[int],
+        partial_segments: Optional[Dict[int, int]] = None,
+    ) -> np.ndarray:
+        canvas_w, canvas_h = self._get_preview_canvas_dimensions()
+        canvas = np.zeros((canvas_h, canvas_w, 4), dtype=np.float32)
+
+        strokes = self.paint_strokes_timeline
+        if not strokes:
+            return canvas
+
+        work_w = float(self.slicer.work_w_mm)
+        work_h = float(self.slicer.work_h_mm)
+
+        partial_segments = partial_segments or {}
+        max_index = len(strokes) - 1 if upto_stroke is None else upto_stroke
+
+        for idx, stroke in enumerate(strokes):
+            if idx > max_index and idx not in partial_segments:
+                break
+
+            segments_completed = partial_segments.get(idx)
+            self._paint_stroke_with_limit(
+                canvas,
+                stroke,
+                canvas_w,
+                canvas_h,
+                work_w,
+                work_h,
+                segments_completed=segments_completed,
+            )
+
+        return canvas
+
+    def _array_to_qpixmap(self, canvas: np.ndarray) -> QPixmap:
+        h, w, _ = canvas.shape
+        clamped = np.clip(canvas, 0.0, 1.0)
+        data = (clamped * 255).astype(np.uint8)
+        image = QImage(data.data, w, h, data.strides[0], QImage.Format_RGBA8888)
+        image = image.copy()
+        return QPixmap.fromImage(image)
+
     def render_preview_full_colored(self):
         """
         Malt die komplette Szene farbig:
         - Jeder Stroke in seiner RGB-Farbe.
         - Keine Animation, alles fertig.
         """
-        from PySide6.QtGui import QPixmap, QPainter, QPen, QColor
-        from PySide6.QtCore import Qt
-
         self.stop_preview_animation()
 
         if not self.paint_strokes_timeline or len(self.paint_strokes_timeline) == 0:
@@ -1406,39 +1616,8 @@ class MainWindow(QMainWindow):
             self.preview_label.setText("Keine Pfade vorhanden.\nBitte 'Slice planen'.")
             return
 
-        canvas_w, canvas_h = self._get_preview_canvas_dimensions()
-
-        work_w = float(self.slicer.work_w_mm)
-        work_h = float(self.slicer.work_h_mm)
-
-        pm = QPixmap(canvas_w, canvas_h)
-        pm.fill(QColor(0, 0, 0))
-
-        painter = QPainter(pm)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-
-        for stroke in self.paint_strokes_timeline:
-            pts = stroke["points"]
-            color_rgb = stroke["color_rgb"]
-            if len(pts) < 2:
-                continue
-
-            pen = QPen(QColor(color_rgb[0], color_rgb[1], color_rgb[2]))
-            pen.setWidth(2)
-            painter.setPen(pen)
-
-            for i in range(len(pts) - 1):
-                (x1_mm, y1_mm) = pts[i]
-                (x2_mm, y2_mm) = pts[i + 1]
-
-                x1_px = int((x1_mm / work_w) * canvas_w)
-                y1_px = int((y1_mm / work_h) * canvas_h)
-                x2_px = int((x2_mm / work_w) * canvas_w)
-                y2_px = int((y2_mm / work_h) * canvas_h)
-
-                painter.drawLine(x1_px, y1_px, x2_px, y2_px)
-
-        painter.end()
+        canvas = self._render_strokes_to_array(upto_stroke=None)
+        pm = self._array_to_qpixmap(canvas)
 
         self.preview_canvas_pixmap = pm
         self.current_highlight_segment = None
@@ -1456,10 +1635,6 @@ class MainWindow(QMainWindow):
         - Alle kompletten Strokes < anim_stroke_index
         - Angefangener Stroke bei anim_stroke_index bis anim_point_index
         """
-
-        from PySide6.QtGui import QPixmap, QPainter, QPen, QColor
-        from PySide6.QtCore import Qt
-
         if not self.last_mm_paths or len(self.last_mm_paths) == 0:
             self._display_preview_pixmap(None)
             self.preview_label.setText("Keine Pfade vorhanden.\nBitte 'Slice planen'.")
@@ -1469,60 +1644,33 @@ class MainWindow(QMainWindow):
 
         work_w = float(self.slicer.work_w_mm)
         work_h = float(self.slicer.work_h_mm)
+        canvas = np.zeros((canvas_h, canvas_w, 4), dtype=np.float32)
+        brush = self._get_brush_tool(self.selected_tool)
 
-        pm = QPixmap(canvas_w, canvas_h)
-        pm.fill(QColor(0, 0, 0))
+        done_color = (200, 200, 200)
+        active_color = (255, 240, 0)
 
-        painter = QPainter(pm)
-        painter.setRenderHint(QPainter.Antialiasing, True)
+        def path_to_px(path: Sequence[Tuple[float, float]]) -> List[Tuple[float, float]]:
+            return [self._mm_to_canvas_px(pt, canvas_w, canvas_h, work_w, work_h) for pt in path]
 
-        # Strokes, die schon fertig gemalt sind → hellere Farbe
-        done_pen = QPen(QColor(200, 200, 200))
-        done_pen.setWidth(2)
-
-        # Stroke, der gerade gemalt wird → hell/kontrast
-        active_pen = QPen(QColor(255, 255, 0))
-        active_pen.setWidth(2)
-
-        # 1. Alle komplett fertigen Strokes zeichnen
         for s_idx in range(min(self.anim_stroke_index, len(self.last_mm_paths))):
-            stroke = self.last_mm_paths[s_idx]
-            if len(stroke) < 2:
-                continue
+            path = self.last_mm_paths[s_idx]
+            pts_px = path_to_px(path)
+            if pts_px:
+                brush.render_path(canvas, pts_px, done_color)
 
-            painter.setPen(done_pen)
-            for i in range(len(stroke) - 1):
-                (x1_mm, y1_mm) = stroke[i]
-                (x2_mm, y2_mm) = stroke[i + 1]
-
-                x1_px = int((x1_mm / work_w) * canvas_w)
-                y1_px = int((y1_mm / work_h) * canvas_h)
-                x2_px = int((x2_mm / work_w) * canvas_w)
-                y2_px = int((y2_mm / work_h) * canvas_h)
-
-                painter.drawLine(x1_px, y1_px, x2_px, y2_px)
-
-        # 2. Den Stroke, der gerade „live“ gemalt wird
         if self.anim_stroke_index < len(self.last_mm_paths):
-            stroke = self.last_mm_paths[self.anim_stroke_index]
-            if len(stroke) >= 2:
-                painter.setPen(active_pen)
+            path = self.last_mm_paths[self.anim_stroke_index]
+            pts_px = path_to_px(path)
+            if pts_px:
+                segments = min(self.anim_point_index, max(len(pts_px) - 1, 0))
+                if segments <= 0:
+                    brush.stamp(canvas, pts_px[0], active_color)
+                else:
+                    brush.render_path(canvas, pts_px[: segments + 1], active_color)
 
-                # wir zeichnen nur bis anim_point_index
-                max_i = min(self.anim_point_index, len(stroke) - 1)
-                for i in range(max_i):
-                    (x1_mm, y1_mm) = stroke[i]
-                    (x2_mm, y2_mm) = stroke[i + 1]
-
-                    x1_px = int((x1_mm / work_w) * canvas_w)
-                    y1_px = int((y1_mm / work_h) * canvas_h)
-                    x2_px = int((x2_mm / work_w) * canvas_w)
-                    y2_px = int((y2_mm / work_h) * canvas_h)
-
-                    painter.drawLine(x1_px, y1_px, x2_px, y2_px)
-
-        painter.end()
-
+        pm = self._array_to_qpixmap(canvas)
+        self.preview_canvas_pixmap = pm
         self._display_preview_pixmap(pm)
 
     def start_preview_animation(self):
@@ -1684,56 +1832,45 @@ class MainWindow(QMainWindow):
         - Alle fertigen Strokes (bis anim_stroke_index-1) in echter Farbe
         - Den aktuellen Stroke (anim_stroke_index) bis anim_point_index in NEON GRÜN
         """
-        from PySide6.QtGui import QPixmap, QPainter, QPen, QColor
-        from PySide6.QtCore import Qt
-
         strokes = self.paint_strokes_timeline
         if not strokes:
             self._display_preview_pixmap(None)
             self.preview_label.setText("Keine Pfade vorhanden.\nBitte 'Slice planen'.")
             return
 
-        if self.preview_canvas_pixmap is None:
-            self._reset_preview_canvas_for_animation()
+        partial: Dict[int, int] = {}
+        if 0 <= self.anim_stroke_index < len(strokes):
+            partial[self.anim_stroke_index] = self.anim_point_index
 
-        if self.preview_canvas_pixmap is None:
-            self._display_preview_pixmap(None)
-            self.preview_label.setText("Keine Pfade vorhanden.\nBitte 'Slice planen'.")
-            return
+        base_canvas = self._render_strokes_to_array(self.anim_stroke_index - 1, partial)
+        self.preview_canvas_pixmap = self._array_to_qpixmap(base_canvas)
 
-        frame_pm = QPixmap(self.preview_canvas_pixmap)
-
+        frame_canvas = base_canvas.copy()
         highlight = self.current_highlight_segment
         if highlight is not None:
             stroke_idx, segment_idx = highlight
             if 0 <= stroke_idx < len(strokes):
                 stroke = strokes[stroke_idx]
-                pts = stroke.get("points", [])
-                if len(pts) >= 2 and 0 <= segment_idx < len(pts) - 1:
-                    painter = QPainter(frame_pm)
-                    painter.setRenderHint(QPainter.Antialiasing, True)
+                pts_px = self._stroke_points_to_px(
+                    stroke,
+                    frame_canvas.shape[1],
+                    frame_canvas.shape[0],
+                    float(self.slicer.work_w_mm),
+                    float(self.slicer.work_h_mm),
+                )
+                if len(pts_px) >= 2 and 0 <= segment_idx < len(pts_px) - 1:
+                    base_tool = self._get_brush_tool(str(stroke.get("tool", "medium_brush")))
+                    highlight_tool = BrushTool(
+                        width_px=base_tool.width_px,
+                        opacity=1.0,
+                        edge_softness=max(0.1, base_tool.edge_softness * 0.6),
+                        flow=1.0,
+                        spacing_px=base_tool.spacing_px,
+                    )
+                    segment_points = pts_px[segment_idx : segment_idx + 2]
+                    highlight_tool.render_path(frame_canvas, segment_points, (64, 255, 128))
 
-                    neon_green = QColor(0, 255, 0, 255)
-                    pen = QPen(neon_green)
-                    pen.setWidth(3)
-                    painter.setPen(pen)
-
-                    work_w = float(self.slicer.work_w_mm)
-                    work_h = float(self.slicer.work_h_mm)
-                    canvas_w = frame_pm.width()
-                    canvas_h = frame_pm.height()
-
-                    (x1_mm, y1_mm) = pts[segment_idx]
-                    (x2_mm, y2_mm) = pts[segment_idx + 1]
-
-                    x1_px = int((x1_mm / work_w) * canvas_w)
-                    y1_px = int((y1_mm / work_h) * canvas_h)
-                    x2_px = int((x2_mm / work_w) * canvas_w)
-                    y2_px = int((y2_mm / work_h) * canvas_h)
-
-                    painter.drawLine(x1_px, y1_px, x2_px, y2_px)
-                    painter.end()
-
+        frame_pm = self._array_to_qpixmap(frame_canvas)
         self._display_preview_pixmap(frame_pm)
 
 
@@ -1748,52 +1885,17 @@ class MainWindow(QMainWindow):
         Baut ein Bild so, als wären alle Strokes bis einschließlich stroke_index
         vollständig gemalt (echte Farbe). Kein Grün.
         """
-        from PySide6.QtGui import QPixmap, QPainter, QPen, QColor
-
         strokes = self.paint_strokes_timeline
         if not strokes:
             return None
 
-        canvas_w, canvas_h = self._get_preview_canvas_dimensions()
-        work_w = float(self.slicer.work_w_mm)
-        work_h = float(self.slicer.work_h_mm)
-
-        pm = QPixmap(canvas_w, canvas_h)
-        pm.fill(QColor(0, 0, 0))
-
-        painter = QPainter(pm)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-
         last_idx = min(stroke_index, len(strokes) - 1)
         if last_idx < 0:
-            # "nix gemalt"
-            painter.end()
-            return pm
+            canvas = self._render_strokes_to_array(upto_stroke=-1)
+            return self._array_to_qpixmap(canvas)
 
-        for s_idx in range(last_idx + 1):
-            stroke = strokes[s_idx]
-            pts = stroke["points"]
-            rgb = stroke["color_rgb"]
-            if len(pts) < 2:
-                continue
-
-            pen = QPen(QColor(rgb[0], rgb[1], rgb[2], 255))
-            pen.setWidth(3)
-            painter.setPen(pen)
-
-            for i in range(len(pts) - 1):
-                (x1_mm, y1_mm) = pts[i]
-                (x2_mm, y2_mm) = pts[i + 1]
-
-                x1_px = int((x1_mm / work_w) * canvas_w)
-                y1_px = int((y1_mm / work_h) * canvas_h)
-                x2_px = int((x2_mm / work_w) * canvas_w)
-                y2_px = int((y2_mm / work_h) * canvas_h)
-
-                painter.drawLine(x1_px, y1_px, x2_px, y2_px)
-
-        painter.end()
-        return pm
+        canvas = self._render_strokes_to_array(upto_stroke=last_idx)
+        return self._array_to_qpixmap(canvas)
 
 
 
@@ -1840,66 +1942,14 @@ class MainWindow(QMainWindow):
         nahtlos angeschlossen wird.
         Danach benutzen wir dieses Canvas weiter inkrementell.
         """
-        from PySide6.QtGui import QPixmap, QPainter, QPen, QColor
         strokes = getattr(self, "paint_strokes_timeline", [])
 
-        canvas_w, canvas_h = self._get_preview_canvas_dimensions()
-        work_w = float(self.slicer.work_w_mm)
-        work_h = float(self.slicer.work_h_mm)
-
-        # Neues Pixmap als Basis
-        pm = QPixmap(canvas_w, canvas_h)
-        pm.fill(QColor(0, 0, 0))
-
-        painter = QPainter(pm)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-
-        # Male alle komplett fertigen Strokes schon rein (voller Deckkraft)
-        for s_idx in range(min(self.anim_stroke_index, len(strokes))):
-            self._draw_full_stroke(painter, strokes[s_idx], canvas_w, canvas_h, work_w, work_h)
-
-        # Teile des aktuellen Strokes, die bereits gemalt wurden, hinzufügen
+        partial: Dict[int, int] = {}
         if 0 <= self.anim_stroke_index < len(strokes):
-            stroke = strokes[self.anim_stroke_index]
-            pts = stroke["points"]
-            rgb = stroke["color_rgb"]
-            if len(pts) >= 2:
-                pen = QPen(QColor(rgb[0], rgb[1], rgb[2], 255))
-                pen.setWidth(3)
-                painter.setPen(pen)
+            partial[self.anim_stroke_index] = self.anim_point_index
 
-                upto = min(max(self.anim_point_index, 0), len(pts) - 1)
-                for i in range(upto):
-                    (x1_mm, y1_mm) = pts[i]
-                    (x2_mm, y2_mm) = pts[i + 1]
-                    x1_px = int((x1_mm / work_w) * canvas_w)
-                    y1_px = int((y1_mm / work_h) * canvas_h)
-                    x2_px = int((x2_mm / work_w) * canvas_w)
-                    y2_px = int((y2_mm / work_h) * canvas_h)
-                    painter.drawLine(x1_px, y1_px, x2_px, y2_px)
-
-        painter.end()
-        self.preview_canvas_pixmap = pm
-
-
-    def _draw_full_stroke(self, painter, stroke: Dict[str, Any], canvas_w: int, canvas_h: int, work_w: float, work_h: float) -> None:
-        pts = stroke.get("points", [])
-        rgb = stroke.get("color_rgb", (255, 255, 255))
-        if len(pts) < 2:
-            return
-
-        pen = QPen(QColor(rgb[0], rgb[1], rgb[2], 255))
-        pen.setWidth(3)
-        painter.setPen(pen)
-
-        for i in range(len(pts) - 1):
-            (x1_mm, y1_mm) = pts[i]
-            (x2_mm, y2_mm) = pts[i + 1]
-            x1_px = int((x1_mm / work_w) * canvas_w)
-            y1_px = int((y1_mm / work_h) * canvas_h)
-            x2_px = int((x2_mm / work_w) * canvas_w)
-            y2_px = int((y2_mm / work_h) * canvas_h)
-            painter.drawLine(x1_px, y1_px, x2_px, y2_px)
+        canvas = self._render_strokes_to_array(self.anim_stroke_index - 1, partial)
+        self.preview_canvas_pixmap = self._array_to_qpixmap(canvas)
 
 
     def _finalize_segment_into_canvas(self, stroke_index: int, segment_index: int) -> None:
@@ -1915,34 +1965,9 @@ class MainWindow(QMainWindow):
         if len(pts) < 2 or segment_index < 0 or segment_index >= len(pts) - 1:
             return
 
-        if self.preview_canvas_pixmap is None:
-            self._reset_preview_canvas_for_animation()
-
-        if self.preview_canvas_pixmap is None:
-            return
-
-        canvas_w = self.preview_canvas_pixmap.width()
-        canvas_h = self.preview_canvas_pixmap.height()
-        work_w = float(self.slicer.work_w_mm)
-        work_h = float(self.slicer.work_h_mm)
-
-        color_rgb = stroke.get("color_rgb", (255, 255, 255))
-        painter = QPainter(self.preview_canvas_pixmap)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-
-        pen = QPen(QColor(color_rgb[0], color_rgb[1], color_rgb[2], 255))
-        pen.setWidth(3)
-        painter.setPen(pen)
-
-        (x1_mm, y1_mm) = pts[segment_index]
-        (x2_mm, y2_mm) = pts[segment_index + 1]
-        x1_px = int((x1_mm / work_w) * canvas_w)
-        y1_px = int((y1_mm / work_h) * canvas_h)
-        x2_px = int((x2_mm / work_w) * canvas_w)
-        y2_px = int((y2_mm / work_h) * canvas_h)
-
-        painter.drawLine(x1_px, y1_px, x2_px, y2_px)
-        painter.end()
+        partial = {stroke_index: segment_index + 1}
+        canvas = self._render_strokes_to_array(stroke_index - 1, partial)
+        self.preview_canvas_pixmap = self._array_to_qpixmap(canvas)
 
 
     def _finalize_current_highlight_to_canvas(self) -> None:
