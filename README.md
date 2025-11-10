@@ -39,6 +39,27 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+#### Windows: PyTorch lässt sich nicht importieren (WinError 1114)
+
+Falls beim Starten eines Skripts der Fehler
+
+```
+OSError: [WinError 1114] Eine DLL-Initialisierungsroutine ist fehlgeschlagen
+```
+
+auftritt, fehlen dem System in der Regel die nativen Bibliotheken von PyTorch.
+Installiere zunächst die aktuelle **Microsoft Visual C++ 2015–2022
+Redistributable (x64)**. Anschliessend kannst du die CPU-Version von PyTorch
+explizit installieren:
+
+```bash
+pip install --upgrade --index-url https://download.pytorch.org/whl/cpu torch torchvision
+```
+
+Starte danach dein virtuelles Environment neu. Unsere Module prüfen den Import
+von PyTorch beim Programmstart und geben andernfalls eine ausführliche
+Anleitung aus.
+
 ### Training
 
 ```bash

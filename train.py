@@ -6,8 +6,6 @@ import argparse
 import runpy
 from pathlib import Path
 
-import torch
-import torch.nn as nn
 from torch.optim import Adam
 from torch.optim.lr_scheduler import StepLR
 from tqdm import tqdm
@@ -16,7 +14,11 @@ from config import Config, ensure_directories
 from dataset import create_dataloaders
 from losses import CompositeLoss
 from model import UnderpaintingToPhotoModel
+from torch_utils import ensure_torch_available, nn, torch
 from utils import ImageTriplet, save_image_triplet, tensor_to_image
+
+
+ensure_torch_available()
 
 
 def _prepare_perceptual_input(tensor: torch.Tensor) -> torch.Tensor:

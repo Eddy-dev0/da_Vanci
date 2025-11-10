@@ -7,13 +7,16 @@ from pathlib import Path
 from typing import Callable, Dict, List, Optional, Tuple
 
 import numpy as np
-import torch
 from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 
 from config import Config
 from utils import analyze_underpainting, load_image, stack_feature_maps
+from torch_utils import ensure_torch_available, torch
+
+
+ensure_torch_available()
 
 
 class UnderpaintingPhotoDataset(Dataset):
