@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from painterslicer.image_analysis.analyzer import ImageAnalyzer
 from painterslicer.image_analysis.pipeline import PaintingPipeline, PipelineResult
 from painterslicer.slicer.slicer_core import PainterSlicer
+from painterslicer.slicer.layers import PaintLayer
 from painterslicer.utils.brush_tool import BrushTool
 
 
@@ -59,7 +60,7 @@ class MainWindow(QMainWindow):
         self.active_style_profile: Dict[str, Any] = {}
         self.active_pipeline_profile: Dict[str, Any] = {}
         self._active_brush_overrides: Dict[str, Dict[str, Any]] = {}
-        self._brush_tool_cache: Dict[str, Tuple[Dict[str, Any], BrushTool]] = {}
+        self._brush_tool_cache: Dict[Tuple[str, Tuple[Tuple[str, Any], ...]], BrushTool] = {}
         self._apply_style_profile(self.selected_style_key)
 
         self.last_pipeline_result: Optional[PipelineResult] = None
@@ -484,66 +485,28 @@ class MainWindow(QMainWindow):
             step_id += 1
 
         # 2. In mm skalieren
-        normalized_layers = self.slicer.normalize_color_layers_to_mm(
+        normalized_layers: List[PaintLayer] = self.slicer.normalize_color_layers_to_mm(
             self.current_image_path,
-            color_layers
+            color_layers,
+            style_key=self.selected_style_key,
         )
 
-        stage_priority = {"background": 0, "mid": 1, "detail": 2}
-
-        def _sort_key(layer: Dict[str, Any]) -> Tuple[int, int, float]:
-            return (
-                layer.get("order", 1_000_000),
-                stage_priority.get(layer.get("stage"), 1),
-                layer.get("_approx_luminance", 0.0),
-            )
-
-        accent_layers = [
-            layer for layer in normalized_layers if layer.get("shading") in {"highlight", "shadow"}
-        ]
-        base_layers = [
-            layer for layer in normalized_layers if layer.get("shading") not in {"highlight", "shadow"}
-        ]
-
-        base_layers.sort(key=_sort_key)
-        accent_layers.sort(
-            key=lambda layer: (
-                layer.get("order", 1_000_000),
-                0 if layer.get("shading") == "shadow" else 1,
-                layer.get("_approx_luminance", 0.0),
-            )
-        )
-
-        normalized_layers = base_layers + accent_layers
+        normalized_layers.sort(key=lambda layer: layer.sort_depth_key())
 
         clean_interval = slicer_style.get("clean_interval") if slicer_style else None
 
-        execution_profiles = []
+        execution_profiles: List[PaintLayer] = []
         for layer in normalized_layers:
-            exec_params = self.slicer.derive_layer_execution(
-                layer,
-                default_tool=self.selected_tool,
-                default_pressure=self.paint_pressure,
-                z_down=self.z_down,
-                z_up=self.z_up,
-                clean_interval=clean_interval,
+            execution_profiles.append(
+                self.slicer.derive_layer_execution(
+                    layer,
+                    default_tool=self.selected_tool,
+                    default_pressure=self.paint_pressure,
+                    z_down=self.z_down,
+                    z_up=self.z_up,
+                    clean_interval=clean_interval,
+                )
             )
-            exec_params.update(
-                {
-                    "color_rgb": layer.get("color_rgb", (0, 0, 0)),
-                    "stage": layer.get("stage"),
-                    "technique": layer.get("technique"),
-                    "shading": layer.get("shading"),
-                    "coverage": layer.get("coverage"),
-                    "order": layer.get("order"),
-                    "label": layer.get("label"),
-                    "detail_strength": layer.get("detail_strength"),
-                    "highlight_strength": layer.get("highlight_strength"),
-                    "shadow_strength": layer.get("shadow_strength"),
-                    "mm_paths": layer.get("mm_paths", []),
-                }
-            )
-            execution_profiles.append(exec_params)
         # normalized_layers = [
         #   { "color_rgb": (r,g,b), "mm_paths": [ [ (x_mm,y_mm)... ], ... ] },
         #   ...
@@ -556,7 +519,7 @@ class MainWindow(QMainWindow):
         z_down = self.z_down
 
         paintcode_multi = self.slicer.multi_layer_paintcode(
-            normalized_layers,
+            execution_profiles,
             tool_name=tool_name,
             pressure=pressure,
             z_up=z_up,
@@ -569,25 +532,27 @@ class MainWindow(QMainWindow):
         # jeweils mit Farbe und Punkten.
         self.paint_strokes_timeline = []
         for profile in execution_profiles:
-            mm_paths = profile.get("mm_paths", [])
-            for pass_idx in range(profile.get("passes", 1)):
+            mm_paths = profile.mm_paths
+            for pass_idx in range(profile.passes):
                 for stroke in mm_paths:
                     if len(stroke) < 2:
                         continue
                     self.paint_strokes_timeline.append(
                         {
-                            "color_rgb": profile.get("color_rgb"),
+                            "color_rgb": profile.color_rgb,
                             "points": stroke,
-                            "stage": profile.get("stage"),
-                            "technique": profile.get("technique"),
-                            "label": profile.get("label"),
-                            "shading": profile.get("shading"),
-                            "tool": profile.get("tool"),
-                            "pressure": profile.get("pressure"),
+                            "stage": profile.stage,
+                            "technique": profile.technique,
+                            "label": profile.label,
+                            "shading": profile.shading,
+                            "tool": profile.tool,
+                            "pressure": profile.pressure,
                             "pass_index": pass_idx,
-                            "passes": profile.get("passes"),
-                            "z_down": profile.get("z_down"),
-                            "z_up": profile.get("z_up"),
+                            "passes": profile.passes,
+                            "z_down": profile.z_down,
+                            "z_up": profile.z_up,
+                            "brush": profile.brush,
+                            "opacity": profile.opacity,
                         }
                     )
 
@@ -617,32 +582,32 @@ class MainWindow(QMainWindow):
             lines_out.append("")
             lines_out.append("--- Layer Execution Mapping ---")
             for idx, profile in enumerate(execution_profiles, start=1):
-                color_rgb = profile.get("color_rgb", (0, 0, 0))
+                color_rgb = profile.color_rgb
                 lines_out.append(
-                    f"Layer {idx} (Stage {profile.get('stage')}, Technik {profile.get('technique')}):"
+                    f"Layer {idx} (Stage {profile.stage}, Technik {profile.technique}):"
                 )
                 lines_out.append(f"  Farbe: RGB{color_rgb}")
                 lines_out.append(
-                    f"  Werkzeug: {profile.get('tool')}  Druck: {profile.get('pressure'):.2f}  Pässe: {profile.get('passes')}"
+                    f"  Werkzeug: {profile.tool}  Druck: {profile.pressure:.2f}  Pässe: {profile.passes}"
                 )
                 lines_out.append(
-                    f"  Z_down: {profile.get('z_down'):.2f}  Z_up: {profile.get('z_up'):.2f}"
+                    f"  Z_down: {profile.z_down:.2f}  Z_up: {profile.z_up:.2f}"
                 )
                 lines_out.append(
-                    f"  Coverage: {profile.get('coverage'):.3f}  Highlights: {profile.get('highlight_strength'):.2f}  Schatten: {profile.get('shadow_strength'):.2f}"
+                    f"  Coverage: {profile.coverage:.3f}  Highlights: {profile.metadata.get('highlight_strength', 0.0):.2f}  Schatten: {profile.metadata.get('shadow_strength', 0.0):.2f}"
                 )
                 lines_out.append("")
         lines_out.append("\n--- Farb-Layer Info ---\n")
         lines_out.append(f"Anzahl Farblayer: {len(normalized_layers)}\n")
 
         for idx, layer in enumerate(normalized_layers):
-            rgb = layer.get("color_rgb", (0, 0, 0))
-            coverage_pct = float(layer.get("coverage", 0.0) * 100.0)
-            stage = layer.get("stage", "?")
-            order = layer.get("order", idx)
-            tool = layer.get("tool", "-")
-            technique = layer.get("technique", "-")
-            path_count = len(layer.get("mm_paths", []))
+            rgb = layer.color_rgb
+            coverage_pct = float(layer.coverage * 100.0)
+            stage = layer.stage or "?"
+            order = layer.order if layer.order is not None else idx
+            tool = layer.tool or "-"
+            technique = layer.technique or "-"
+            path_count = len(layer.mm_paths)
             lines_out.append(
                 f"Layer {idx+1:02d} (Order {order}, Stage {stage}): RGB={rgb}, "
                 f"Coverage={coverage_pct:.1f}%, Pfade={path_count}, Werkzeug={tool}, "
@@ -652,16 +617,17 @@ class MainWindow(QMainWindow):
                 "    detail={detail:.2f} mid={mid:.2f} background={bg:.2f} "
                 "texture={tex:.2f} highlight={hi:.2f} shadow={sh:.2f} "
                 "contrast={co:.2f} colorVar={cv:.2f}".format(
-                    detail=float(layer.get("detail_ratio", 0.0)),
-                    mid=float(layer.get("mid_ratio", 0.0)),
-                    bg=float(layer.get("background_ratio", 0.0)),
-                    tex=float(layer.get("texture_strength", 0.0)),
-                    hi=float(layer.get("highlight_strength", 0.0)),
-                    sh=float(layer.get("shadow_strength", 0.0)),
-                    co=float(layer.get("contrast_strength", 0.0)),
-                    cv=float(layer.get("color_variance_strength", 0.0)),
+                    detail=float(layer.metadata.get("detail_ratio", 0.0)),
+                    mid=float(layer.metadata.get("mid_ratio", 0.0)),
+                    bg=float(layer.metadata.get("background_ratio", 0.0)),
+                    tex=float(layer.metadata.get("texture_strength", 0.0)),
+                    hi=float(layer.metadata.get("highlight_strength", 0.0)),
+                    sh=float(layer.metadata.get("shadow_strength", 0.0)),
+                    co=float(layer.metadata.get("contrast_strength", 0.0)),
+                    cv=float(layer.metadata.get("color_variance_strength", 0.0)),
                 )
             )
+
 
         lines_out.append("\n--- PaintCode (Multi-Layer) ---\n")
         lines_out.append(paintcode_multi)
@@ -1553,15 +1519,31 @@ class MainWindow(QMainWindow):
 
 
 
-    def _get_brush_parameters(self, tool_name: str) -> Dict[str, Any]:
-        params = self.slicer.get_brush_settings(tool_name)
+    def _get_brush_parameters(
+        self,
+        tool_name: str,
+        overrides: Optional[Dict[str, Any]] = None,
+        opacity_override: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        params = dict(self.slicer.get_brush_settings(tool_name))
+        if overrides:
+            params.update({k: v for k, v in overrides.items() if v is not None})
+        if opacity_override is not None:
+            params["opacity"] = opacity_override
         return params
 
-    def _get_brush_tool(self, tool_name: str) -> BrushTool:
-        params = self._get_brush_parameters(tool_name)
-        cache_entry = self._brush_tool_cache.get(tool_name)
-        if cache_entry and cache_entry[0] == params:
-            return cache_entry[1]
+    def _get_brush_tool(
+        self,
+        tool_name: str,
+        *,
+        brush_config: Optional[Dict[str, Any]] = None,
+        opacity: Optional[float] = None,
+    ) -> BrushTool:
+        params = self._get_brush_parameters(tool_name, brush_config, opacity)
+        cache_key = (tool_name, tuple(sorted(params.items())))
+        brush = self._brush_tool_cache.get(cache_key)
+        if brush is not None:
+            return brush
 
         brush = BrushTool(
             width_px=params.get("width_px", 24.0),
@@ -1570,7 +1552,7 @@ class MainWindow(QMainWindow):
             flow=params.get("flow", 0.7),
             spacing_px=params.get("spacing_px"),
         )
-        self._brush_tool_cache[tool_name] = (dict(params), brush)
+        self._brush_tool_cache[cache_key] = brush
         return brush
 
     def _mm_to_canvas_px(
@@ -1613,7 +1595,11 @@ class MainWindow(QMainWindow):
 
         color_rgb = tuple(stroke.get("color_rgb", (255, 255, 255)))
         tool_name = str(stroke.get("tool", "medium_brush"))
-        brush = self._get_brush_tool(tool_name)
+        brush = self._get_brush_tool(
+            tool_name,
+            brush_config=stroke.get("brush"),
+            opacity=stroke.get("opacity"),
+        )
 
         total_segments = max(len(points_px) - 1, 0)
         if segments_completed is None or segments_completed >= total_segments:
