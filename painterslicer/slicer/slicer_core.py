@@ -31,6 +31,7 @@ class PainterSlicer:
 
         # brush presets
         self.brush_presets = load_brush_presets()
+        self._brush_overrides: Dict[str, Dict[str, Any]] = {}
 
     def apply_style_profile(self, profile: Optional[Dict[str, Any]]):
         """Übernimmt Stil-Parameter für den Slicer (Raster, Glaze-Pässe, Reinigung)."""
@@ -58,6 +59,15 @@ class PainterSlicer:
                 self.clean_interval_default = max(1, int(clean_interval))
             except (TypeError, ValueError):
                 pass
+
+    def apply_brush_overrides(self, overrides: Optional[Dict[str, Dict[str, Any]]]) -> None:
+        self._brush_overrides = {k: dict(v) for k, v in (overrides or {}).items()}
+
+    def get_brush_settings(self, tool_name: str) -> Dict[str, Any]:
+        base = dict(self.brush_presets.get(tool_name, {}))
+        override = self._brush_overrides.get(tool_name, {})
+        base.update({k: v for k, v in override.items() if v is not None})
+        return base
 
     def generate_paint_plan(self, layer_masks: Dict[str, Any]) -> dict:
         plan = [
@@ -110,7 +120,7 @@ class PainterSlicer:
         Hole empfohlenen Druck (0..1) aus brush_presets.json.
         Falls nicht vorhanden, Standard 0.3 zurückgeben.
         """
-        preset = self.brush_presets.get(tool_name, {})
+        preset = self.get_brush_settings(tool_name)
         val = preset.get("max_pressure", None)
         try:
             return float(val) if val is not None else 0.3
@@ -134,7 +144,7 @@ class PainterSlicer:
         stroke_id = 1
 
         # Hole Brush-Metadaten aus Presets (Farbe, Cleaning)
-        brush_meta = self.brush_presets.get(tool_name, {})
+        brush_meta = self.get_brush_settings(tool_name)
         color_rgb = brush_meta.get("color_rgb", [0, 0, 0])
         needs_cleaning = bool(brush_meta.get("needs_cleaning", True))
 
@@ -344,7 +354,7 @@ class PainterSlicer:
         stage_to_tool = layer.get("tool")
         tool = stage_to_tool if isinstance(stage_to_tool, str) else default_tool
 
-        brush_meta = self.brush_presets.get(tool, {})
+        brush_meta = self.get_brush_settings(tool)
         preset_pressure = brush_meta.get("default_pressure")
         if preset_pressure is None:
             preset_pressure = self._get_brush_pressure(tool)
