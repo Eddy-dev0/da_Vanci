@@ -12,10 +12,18 @@ except Exception:  # pragma: no cover - lightweight fallback
     class KMeans:  # type: ignore[override]
         """Minimal fallback implementation used when scikit-learn is unavailable."""
 
-        def __init__(self, n_clusters: int, *, n_init: int = 10, random_state: int = 0):
+        def __init__(
+            self,
+            n_clusters: int,
+            *,
+            n_init: int = 10,
+            random_state: int = 0,
+            max_iter: int = 300,
+        ):
             self.n_clusters = int(max(1, n_clusters))
             self.n_init = int(max(1, n_init))
             self.random_state = int(random_state)
+            self.max_iter = int(max(1, max_iter))
             self.cluster_centers_: Optional[np.ndarray] = None
             self.labels_: Optional[np.ndarray] = None
 
@@ -34,15 +42,21 @@ except Exception:  # pragma: no cover - lightweight fallback
             indices = rng.choice(data.shape[0], size=self.n_clusters, replace=replace)
             centers = data[indices].astype(np.float32)
 
-            # Single pass assignment, good enough for deterministic tests
-            distances = ((data[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
-            labels = distances.argmin(axis=1)
+            labels = np.zeros((data.shape[0],), dtype=np.int32)
 
-            # Update centers once to reduce obvious bias
-            for cluster_idx in range(self.n_clusters):
-                members = data[labels == cluster_idx]
-                if members.size > 0:
-                    centers[cluster_idx] = members.mean(axis=0)
+            for _ in range(self.max_iter):
+                distances = ((data[:, None, :] - centers[None, :, :]) ** 2).sum(axis=2)
+                new_labels = distances.argmin(axis=1)
+
+                if np.array_equal(new_labels, labels):
+                    break
+
+                labels = new_labels
+
+                for cluster_idx in range(self.n_clusters):
+                    members = data[labels == cluster_idx]
+                    if members.size > 0:
+                        centers[cluster_idx] = members.mean(axis=0)
 
             self.cluster_centers_ = centers
             self.labels_ = labels.astype(np.int32)
@@ -64,6 +78,7 @@ def _fit_kmeans_compat(
     *,
     n_clusters: int,
     random_state: int = 0,
+    max_iter: int = 300,
 ) -> KMeans:
     """Fit ``KMeans`` with ``n_init`` compatible across scikit-learn versions."""
 
@@ -72,6 +87,7 @@ def _fit_kmeans_compat(
             n_clusters=n_clusters,
             n_init="auto",
             random_state=random_state,
+            max_iter=max_iter,
         )
         return model.fit(data)
     except (TypeError, ValueError):
@@ -79,6 +95,7 @@ def _fit_kmeans_compat(
             n_clusters=n_clusters,
             n_init=10,
             random_state=random_state,
+            max_iter=max_iter,
         )
         return model.fit(data)
 
@@ -708,6 +725,8 @@ class ImageAnalyzer:
         detail_edge_boost: float = 1.0,
         edge_sensitivity: float = 1.0,
         microtransition_boost: float = 1.0,
+        super_sample_scale: float = 1.0,
+        max_analysis_dimension: Optional[int] = 2048,
         chroma_boost: float = 1.0,
         highlight_boost: float = 0.0,
     ) -> List[Dict[str, Any]]:
@@ -752,27 +771,62 @@ class ImageAnalyzer:
 
         orig_h, orig_w = img_srgb01.shape[:2]
 
-        # Hohe Auflösung bremst KMeans stark aus. Um UI-Timeouts zu vermeiden,
-        # rechnen wir auf einer verkleinerten Kopie (max_dim Pixel) und
-        # skalieren die Ergebnisse anschließend wieder auf die Originalgröße.
-        max_dim = int(800 * float(np.clip(np.sqrt(detail_scale), 1.0, 2.1)))
-        if max(orig_h, orig_w) > max_dim:
-            scale = max_dim / float(max(orig_h, orig_w))
-            new_w = max(1, int(round(orig_w * scale)))
-            new_h = max(1, int(round(orig_h * scale)))
-            img_srgb01_proc = cv2.resize(
-                img_srgb01,
+        analysis_limit = max_analysis_dimension
+        if analysis_limit is not None:
+            try:
+                analysis_limit = int(analysis_limit)
+            except (TypeError, ValueError):
+                analysis_limit = None
+        if analysis_limit is not None and analysis_limit <= 0:
+            analysis_limit = None
+
+        super_sample_scale = float(np.clip(super_sample_scale, 1.0, 4.0))
+
+        analysis_rgb01 = img_srgb01
+        if super_sample_scale > 1.0:
+            upscale_w = max(1, int(round(orig_w * super_sample_scale)))
+            upscale_h = max(1, int(round(orig_h * super_sample_scale)))
+            analysis_rgb01 = cv2.resize(
+                analysis_rgb01,
+                (upscale_w, upscale_h),
+                interpolation=cv2.INTER_CUBIC,
+            )
+
+        analysis_h, analysis_w = analysis_rgb01.shape[:2]
+
+        if (
+            analysis_limit is not None
+            and max(analysis_h, analysis_w) > analysis_limit
+        ):
+            scale = analysis_limit / float(max(analysis_h, analysis_w))
+            new_w = max(1, int(round(analysis_w * scale)))
+            new_h = max(1, int(round(analysis_h * scale)))
+            analysis_rgb01 = cv2.resize(
+                analysis_rgb01,
                 (new_w, new_h),
                 interpolation=cv2.INTER_AREA,
             )
-        else:
-            img_srgb01_proc = img_srgb01
+            analysis_h, analysis_w = analysis_rgb01.shape[:2]
+
+        if analysis_h == 0 or analysis_w == 0:
+            return []
+
+        base_pixel_count = max(float(orig_h * orig_w), 1.0)
+        analysis_pixel_ratio_raw = (analysis_h * analysis_w) / base_pixel_count
+        analysis_pixel_ratio_raw = float(max(analysis_pixel_ratio_raw, 1e-6))
+        analysis_pixel_ratio = max(analysis_pixel_ratio_raw, 1.0)
+
+        kmeans_max_iter = 320
+        if analysis_pixel_ratio >= 1.75:
+            kmeans_max_iter = 420
+        if analysis_pixel_ratio >= 3.0:
+            kmeans_max_iter = 520
 
         if k_colors is not None:
             k_min = max(1, int(k_colors))
             k_max = k_min
 
-        img8 = (img_srgb01_proc.clip(0, 1) * 255).astype(np.uint8)
+        img8 = (analysis_rgb01.clip(0, 1) * 255).astype(np.uint8)
         lab_cv = cv2.cvtColor(img8, cv2.COLOR_RGB2LAB)
         l, a, b = cv2.split(lab_cv)
         l = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8)).apply(l)
@@ -793,9 +847,14 @@ class ImageAnalyzer:
 
         lab = rgb2lab(pre_rgb01)
         H, W, _ = lab.shape
+        analysis_shape = (int(H), int(W))
 
-        base_segments = (H * W) / 1800
-        target_segments = int(np.clip(base_segments * detail_scale, 220, 3600))
+        total_pixels = float(H * W)
+        base_segments = max(total_pixels / 1800.0, 1.0)
+        segment_cap = int(np.clip(3600 * analysis_pixel_ratio, 220, 12000))
+        target_segments = int(np.clip(base_segments * detail_scale, 220, segment_cap))
+        max_segments_allowed = int(max(total_pixels / 2.0, 1.0))
+        target_segments = max(1, min(target_segments, max_segments_allowed))
         slic_compactness = float(np.clip(12.0 / max(detail_scale, 0.5), 5.0, 18.0))
         segments = slic(
             pre_rgb01,
@@ -835,6 +894,7 @@ class ImageAnalyzer:
             mean_lab_valid,
             n_clusters=k_auto,
             random_state=0,
+            max_iter=kmeans_max_iter,
         )
         centers_lab = km.cluster_centers_
 
@@ -1009,6 +1069,11 @@ class ImageAnalyzer:
             "palette_rgb01": palette_rgb01,
             "quant_rgb01": quant_rgb01.astype(np.float32),
             "shading_annotations": shading_annotations,
+            "analysis_shape": analysis_shape,
+            "analysis_pixel_ratio": float(analysis_pixel_ratio_raw),
+            "analysis_pixel_ratio_effective": float(analysis_pixel_ratio),
+            "analysis_super_sample_scale": float(super_sample_scale),
+            "analysis_max_dimension": None if analysis_limit is None else int(analysis_limit),
         }
 
         layers: List[Dict[str, Any]] = []
@@ -1283,6 +1348,11 @@ class ImageAnalyzer:
             "chroma_boost": style_profile.get("chroma_boost", 1.0),
             "highlight_boost": style_profile.get("highlight_boost", 0.0),
         }
+
+        if "super_sample_scale" in style_profile and style_profile["super_sample_scale"] is not None:
+            extract_kwargs["super_sample_scale"] = style_profile["super_sample_scale"]
+        if "max_analysis_dimension" in style_profile and style_profile["max_analysis_dimension"] is not None:
+            extract_kwargs["max_analysis_dimension"] = style_profile["max_analysis_dimension"]
 
         extractor = getattr(self, "extract_color_layers", None)
         if not callable(extractor):
@@ -1715,6 +1785,7 @@ def quantize_adaptive_lab(img_srgb01: np.ndarray, k_min: int = 8, k_max: int = 1
         X,
         n_clusters=k,
         random_state=0,
+        max_iter=320,
     )
     centers = km.cluster_centers_
     labels = km.labels_.reshape(H, W)
