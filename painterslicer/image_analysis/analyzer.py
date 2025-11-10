@@ -1614,6 +1614,7 @@ class ImageAnalyzer:
                 "path_count": int(path_count),
                 "path_length": int(path_length),
                 "pixel_paths": layer["pixel_paths"],
+                "mask": layer_mask.astype(np.uint8),
                 "stage_priority": stage_priority.get(stage, 1),
             })
 

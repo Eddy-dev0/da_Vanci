@@ -1,9 +1,10 @@
-from typing import Dict, Any, List, Tuple, Optional
+from typing import Dict, Any, List, Tuple, Optional, Iterable
 import cv2
 from painterslicer.config.config_loader import load_machine_config, load_brush_presets
 import numpy as np
 from skimage.color import lab2rgb
 from painterslicer.utils.color_model import PaintColorModel
+from .layers import PaintLayer
 
 
 class PainterSlicer:
@@ -229,7 +230,13 @@ class PainterSlicer:
 
 
 
-    def normalize_color_layers_to_mm(self, image_path: str, color_layers: list):
+    def normalize_color_layers_to_mm(
+        self,
+        image_path: str,
+        color_layers: list,
+        *,
+        style_key: Optional[str] = None,
+    ) -> List[PaintLayer]:
         """
         Nimmt die ``color_layers`` vom Analyzer (jede hat ``pixel_paths`` + reichhaltige
         Metadaten) und rechnet alle ``pixel_paths`` in mm um. Zusätzlich werden die
@@ -237,20 +244,9 @@ class PainterSlicer:
         Slice-Prozess diese Informationen vollständig ausnutzen kann.
 
         Rückgabe:
-        [
-            {
-                "color_rgb": (r, g, b),
-                "mm_paths": [ [(x_mm, y_mm), ...], ... ],
-                "stage": "background" | "mid" | "detail",
-                "tool": str,
-                "technique": str,
-                "coverage": float,
-                "detail_strength": float,
-                "highlight_strength": float,
-                ...
-            },
-            ...
-        ]
+        List[:class:`PaintLayer`] preserving all analysis metadata while exposing
+        millimetre converted paths, inferred depth ordering, opacity and brush
+        configuration for every layer.
         """
 
         img = cv2.imread(image_path)
@@ -271,13 +267,13 @@ class PainterSlicer:
             )
         )
 
-        norm_layers = []
+        norm_layers: List[PaintLayer] = []
 
         for idx, layer in indexed_layers:
             pixel_paths = layer.get("pixel_paths", []) or []
             rgb = tuple(layer.get("color_rgb", (0, 0, 0)))
 
-            mm_paths = []
+            mm_paths: List[List[Tuple[float, float]]] = []
             for path in pixel_paths:
                 mm_path = []
                 for (x_px, y_px) in path:
@@ -294,46 +290,68 @@ class PainterSlicer:
                 else 0.0
             )
 
-            enriched = {
-                "color_rgb": rgb,
-                "mm_paths": mm_paths,
-                "order": layer.get("order", idx),
-                "stage": layer.get("stage"),
-                "tool": layer.get("tool"),
-                "technique": layer.get("technique"),
-                "coverage": float(layer.get("coverage", 0.0)),
-                "detail_ratio": float(layer.get("detail_ratio", 0.0)),
-                "mid_ratio": float(layer.get("mid_ratio", 0.0)),
-                "background_ratio": float(layer.get("background_ratio", 0.0)),
-                "detail_strength": float(layer.get("detail_strength", 0.0)),
-                "mid_strength": float(layer.get("mid_strength", 0.0)),
-                "background_strength": float(layer.get("background_strength", 0.0)),
-                "texture_strength": float(layer.get("texture_strength", 0.0)),
-                "highlight_strength": float(layer.get("highlight_strength", 0.0)),
-                "shadow_strength": float(layer.get("shadow_strength", 0.0)),
-                "contrast_strength": float(layer.get("contrast_strength", 0.0)),
-                "color_variance_strength": float(layer.get("color_variance_strength", 0.0)),
-                "path_count": int(layer.get("path_count", len(mm_paths))),
-                "path_length": int(layer.get("path_length", 0)),
-                "shading": layer.get("shading"),
-                "label": layer.get("label"),
-                "_approx_luminance": float(luminance),
-            }
+            tool_name = layer.get("tool")
+            brush_meta = self.get_brush_settings(tool_name) if tool_name else {}
+            depth = float(layer.get("depth", 0.0))
+            if not depth:
+                stage = layer.get("stage")
+                base_stage = stage_priority.get(stage, 1)
+                depth = base_stage * 1000.0 + float(layer.get("order", idx))
+                if layer.get("shading") == "highlight":
+                    depth += 0.1
+                elif layer.get("shading") == "shadow":
+                    depth += 0.2
 
-            norm_layers.append(enriched)
+            opacity = float(brush_meta.get("opacity", 1.0)) if brush_meta else 1.0
+            mask = layer.get("mask")
+
+            paint_layer = PaintLayer(
+                color_rgb=rgb,
+                mm_paths=mm_paths,
+                stage=layer.get("stage"),
+                technique=layer.get("technique"),
+                shading=layer.get("shading"),
+                coverage=float(layer.get("coverage", 0.0)),
+                order=int(layer.get("order", idx)),
+                label=layer.get("label"),
+                depth=depth,
+                opacity=opacity,
+                style_key=style_key,
+                mask=mask,
+                brush=dict(brush_meta),
+                tool=tool_name,
+                metadata={
+                    "detail_ratio": float(layer.get("detail_ratio", 0.0)),
+                    "mid_ratio": float(layer.get("mid_ratio", 0.0)),
+                    "background_ratio": float(layer.get("background_ratio", 0.0)),
+                    "detail_strength": float(layer.get("detail_strength", 0.0)),
+                    "mid_strength": float(layer.get("mid_strength", 0.0)),
+                    "background_strength": float(layer.get("background_strength", 0.0)),
+                    "texture_strength": float(layer.get("texture_strength", 0.0)),
+                    "highlight_strength": float(layer.get("highlight_strength", 0.0)),
+                    "shadow_strength": float(layer.get("shadow_strength", 0.0)),
+                    "contrast_strength": float(layer.get("contrast_strength", 0.0)),
+                    "color_variance_strength": float(layer.get("color_variance_strength", 0.0)),
+                    "path_count": int(layer.get("path_count", len(mm_paths))),
+                    "path_length": int(layer.get("path_length", 0)),
+                    "_approx_luminance": float(luminance),
+                },
+            )
+
+            norm_layers.append(paint_layer)
 
         return norm_layers
 
     def derive_layer_execution(
         self,
-        layer: Dict[str, Any],
+        layer: PaintLayer,
         *,
         default_tool: str,
         default_pressure: float,
         z_down: float,
         z_up: Optional[float] = None,
         clean_interval: Optional[int] = None,
-    ) -> Dict[str, Any]:
+    ) -> PaintLayer:
         """Leitet ausführbare Parameter für eine Farbschicht ab.
 
         Die Analyse liefert umfangreiche Kennwerte (Stage, Technik, Stärken/Schwächen).
@@ -341,17 +359,19 @@ class PainterSlicer:
         Druck, Z-Höhen, Anzahl der Glaze-Pässe und Reinigungsintervalle.
         """
 
-        stage = layer.get("stage") or "mid"
-        technique = layer.get("technique") or ""
-        shading = layer.get("shading") or ""
-        coverage = float(layer.get("coverage", 0.0))
-        detail_strength = float(layer.get("detail_strength", 0.0))
-        highlight_strength = float(layer.get("highlight_strength", 0.0))
-        shadow_strength = float(layer.get("shadow_strength", 0.0))
-        texture_strength = float(layer.get("texture_strength", 0.0))
-        contrast_strength = float(layer.get("contrast_strength", 0.0))
+        metadata = layer.metadata
 
-        stage_to_tool = layer.get("tool")
+        stage = layer.stage or "mid"
+        technique = layer.technique or ""
+        shading = layer.shading or ""
+        coverage = float(layer.coverage)
+        detail_strength = float(metadata.get("detail_strength", 0.0))
+        highlight_strength = float(metadata.get("highlight_strength", 0.0))
+        shadow_strength = float(metadata.get("shadow_strength", 0.0))
+        texture_strength = float(metadata.get("texture_strength", 0.0))
+        contrast_strength = float(metadata.get("contrast_strength", 0.0))
+
+        stage_to_tool = layer.tool
         tool = stage_to_tool if isinstance(stage_to_tool, str) else default_tool
 
         if shading == "highlight":
@@ -363,7 +383,7 @@ class PainterSlicer:
             if not technique:
                 technique = "shadow_glaze"
 
-        brush_meta = self.get_brush_settings(tool)
+        brush_meta = layer.brush or self.get_brush_settings(tool)
         preset_pressure = brush_meta.get("default_pressure")
         if preset_pressure is None:
             preset_pressure = self._get_brush_pressure(tool)
@@ -441,24 +461,20 @@ class PainterSlicer:
 
         needs_cleaning = bool(brush_meta.get("needs_cleaning", True))
 
-        return {
-            "tool": tool,
-            "pressure": pressure,
-            "z_down": layer_z_down,
-            "z_up": layer_z_up,
-            "passes": passes,
-            "clean_interval": clean_interval_layer,
-            "needs_cleaning": needs_cleaning,
-            "technique": technique,
-            "stage": stage,
-            "shading": shading,
-            "coverage": coverage,
-            "detail_strength": detail_strength,
-            "highlight_strength": highlight_strength,
-            "shadow_strength": shadow_strength,
-            "texture_strength": texture_strength,
-            "contrast_strength": contrast_strength,
-        }
+        layer.brush = dict(brush_meta)
+        layer.tool = tool
+        layer.opacity = float(layer.brush.get("opacity", layer.opacity))
+        layer.pressure = pressure
+        layer.z_down = layer_z_down
+        layer.z_up = layer_z_up
+        layer.passes = passes
+        layer.clean_interval = clean_interval_layer
+        layer.needs_cleaning = needs_cleaning
+        layer.technique = technique or layer.technique
+        layer.stage = stage
+        layer.shading = shading or layer.shading
+
+        return layer
 
 
 
@@ -466,7 +482,7 @@ class PainterSlicer:
 
     def multi_layer_paintcode(
         self,
-        normalized_layers: list,
+        normalized_layers: Iterable[PaintLayer],
         *,
         tool_name: str,
         pressure: float,
@@ -502,60 +518,38 @@ class PainterSlicer:
         wash_y = float(wash.get("y", 0.0))
         wash_z = float(wash.get("z", z_up))
 
-        stage_priority = {"background": 0, "mid": 1, "detail": 2}
+        ordered_layers = sorted(normalized_layers, key=lambda layer: layer.sort_depth_key())
 
-        def _base_sort_key(layer: Dict[str, Any]) -> Tuple[int, int, float]:
-            return (
-                layer.get("order", 1_000_000),
-                stage_priority.get(layer.get("stage"), 1),
-                layer.get("_approx_luminance", 0.0),
-            )
-
-        accent_layers: List[Dict[str, Any]] = []
-        base_layers: List[Dict[str, Any]] = []
-        for layer in normalized_layers:
-            if layer.get("shading") in {"highlight", "shadow"}:
-                accent_layers.append(layer)
-            else:
-                base_layers.append(layer)
-
-        base_layers.sort(key=_base_sort_key)
-        accent_layers.sort(
-            key=lambda L: (
-                L.get("order", 1_000_000),
-                0 if L.get("shading") == "shadow" else 1,
-                L.get("_approx_luminance", 0.0),
-            )
-        )
-
-        normalized_layers = base_layers + accent_layers
-
-        for layer_idx, layer in enumerate(normalized_layers):
-            color_rgb = layer.get("color_rgb", (0, 0, 0))
-            mm_paths = layer.get("mm_paths", [])
-
-            if not mm_paths:
+        prepared_layers: List[PaintLayer] = []
+        for layer in ordered_layers:
+            if not layer.mm_paths:
                 continue
 
-            exec_params = self.derive_layer_execution(
-                layer,
-                default_tool=tool_name,
-                default_pressure=pressure,
-                z_down=z_down,
-                z_up=z_up,
-                clean_interval=clean_interval,
+            prepared_layers.append(
+                self.derive_layer_execution(
+                    layer,
+                    default_tool=tool_name,
+                    default_pressure=pressure,
+                    z_down=z_down,
+                    z_up=z_up,
+                    clean_interval=clean_interval,
+                )
             )
 
-            layer_tool = exec_params["tool"]
-            layer_pressure = exec_params["pressure"]
-            layer_z_up = exec_params["z_up"]
-            layer_z_down = exec_params["z_down"]
-            layer_passes = exec_params["passes"]
-            layer_clean_interval = exec_params["clean_interval"]
-            layer_needs_clean = exec_params["needs_cleaning"]
-            layer_stage = exec_params.get("stage")
-            layer_technique = exec_params.get("technique")
-            layer_shading = exec_params.get("shading")
+        for layer_idx, layer in enumerate(prepared_layers):
+            color_rgb = tuple(layer.color_rgb)
+            mm_paths = layer.mm_paths
+
+            layer_tool = layer.tool or tool_name
+            layer_pressure = layer.pressure or pressure
+            layer_z_up = layer.z_up or z_up
+            layer_z_down = layer.z_down or z_down
+            layer_passes = max(int(layer.passes or 1), 1)
+            layer_clean_interval = int(layer.clean_interval or clean_interval)
+            layer_needs_clean = bool(layer.needs_cleaning)
+            layer_stage = layer.stage
+            layer_technique = layer.technique
+            layer_shading = layer.shading
 
             lines.append("; ===============================")
             lines.append(
