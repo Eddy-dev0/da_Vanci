@@ -1,5 +1,4 @@
-"""Brush rendering utilities for PainterSlicer previews and simulation."""
-"""Brush rendering utilities used by the preview and simulator."""
+"""Brush rendering utilities used by the PainterSlicer preview and simulator."""
 
 from __future__ import annotations
 
