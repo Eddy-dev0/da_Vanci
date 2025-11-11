@@ -42,10 +42,7 @@ class UnderpaintingPhotoDataset(Dataset):
 
         self.pairs = self._scan_pairs()
         if not self.pairs:
-            raise RuntimeError(
-                f"No paired images found in {self.underpaint_dir} and {self.target_dir}. "
-                "Ensure the dataset is correctly populated."
-            )
+            raise RuntimeError(self._format_missing_pairs_error())
 
         self.to_tensor = transforms.Compose(
             [
@@ -57,8 +54,16 @@ class UnderpaintingPhotoDataset(Dataset):
     def _scan_pairs(self) -> List[Tuple[Path, Path]]:
         """Find matching filenames between the underpainting and target folders."""
 
+        if not self.underpaint_dir.exists():
+            raise FileNotFoundError(f"Underpainting directory not found: {self.underpaint_dir}")
+        if not self.target_dir.exists():
+            raise FileNotFoundError(f"Target directory not found: {self.target_dir}")
+
         underpaint_files = sorted(
             [p for p in self.underpaint_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+        )
+        target_files = sorted(
+            [p for p in self.target_dir.iterdir() if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
         )
         pairs: List[Tuple[Path, Path]] = []
         for underpaint_path in underpaint_files:
@@ -66,6 +71,32 @@ class UnderpaintingPhotoDataset(Dataset):
             if target_path.exists():
                 pairs.append((underpaint_path, target_path))
         return pairs
+
+    def _format_missing_pairs_error(self) -> str:
+        """Produce a helpful error message when the dataset is empty or misconfigured."""
+
+        def _list_examples(paths: List[Path]) -> str:
+            preview = ", ".join(p.name for p in paths[:3])
+            if not preview:
+                return "(no images found)"
+            remaining = max(len(paths) - 3, 0)
+            return preview + (" ..." if remaining > 0 else "")
+
+        underpaint_files = sorted(
+            [p for p in self.underpaint_dir.glob("*.*") if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+        )
+        target_files = sorted(
+            [p for p in self.target_dir.glob("*.*") if p.suffix.lower() in {".png", ".jpg", ".jpeg"}]
+        )
+
+        return (
+            "No paired images were detected.\n"
+            f"  Underpaint directory: {self.underpaint_dir} ({len(underpaint_files)} files)\n"
+            f"    Examples: {_list_examples(underpaint_files)}\n"
+            f"  Target directory: {self.target_dir} ({len(target_files)} files)\n"
+            f"    Examples: {_list_examples(target_files)}\n"
+            "Ensure both folders contain images with matching filenames (e.g. `0001.png`)."
+        )
 
     def __len__(self) -> int:  # pragma: no cover - trivial
         return len(self.pairs)
