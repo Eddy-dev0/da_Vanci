@@ -25,6 +25,12 @@ def load_model(checkpoint_path: Path, cfg: Config) -> UnderpaintingToPhotoModel:
         out_channels=cfg.out_channels,
         feature_channels=cfg.feature_channels,
     )
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(
+            f"Checkpoint not found at {checkpoint_path}. "
+            "Verify the --checkpoint argument or run training to produce weights."
+        )
+
     checkpoint = torch.load(checkpoint_path, map_location=device)
     model.load_state_dict(checkpoint["model_state_dict"])
     model.to(device)
